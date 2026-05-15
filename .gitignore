@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+env/
+.venv/
+.env
+*.env
+
+# Database
+*.db
+*.sqlite3
+*.sqlite
+
+# Uploads (large binary files — store separately)
+uploads/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node (docs scripts)
+docs/node_modules/
+docs/package-lock.json
+
+# Generated slide images (QA artifacts)
+docs/deck_slides/
+
+# Alembic — keep versions, ignore env
+alembic/versions/__pycache__/

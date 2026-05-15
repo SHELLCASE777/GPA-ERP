@@ -1,0 +1,266 @@
+"""
+Projects router — CRUD + Excel/CSV bulk import.
+Import template columns (case-insensitive):
+  code | name | contract_value | start_date | end_date | status
+"""
+from __future__ import annotations
+
+import io
+from pathlib import Path
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Annotated
+
+import pandas as pd
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import or_
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+
+from app.audit import model_to_dict, write_audit
+from app.database import get_db
+from app.dependencies import CurrentUser, get_client_ip, require_role
+from app.models import Project, ProjectDocument, ProjectStatus, RoleName
+from app.schemas import (
+    MessageResponse, PaginatedResponse, ProjectCreate, ProjectDocumentResponse,
+    ProjectImportResult, ProjectResponse, ProjectUpdate,
+)
+
+router = APIRouter(prefix="/projects", tags=["Projects"])
+
+_write_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.COST_CONTROL)
+
+
+def _get_or_404(project_id: int, db: Session) -> Project:
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return p
+
+
+# ─── CRUD ────────────────────────────────────────────────────────────────────
+
+@router.get("", response_model=PaginatedResponse[ProjectResponse], summary="List all projects")
+def list_projects(
+    current_user: CurrentUser,
+    db:           Annotated[Session, Depends(get_db)],
+    status:       ProjectStatus | None = None,
+    archived:     bool | None = None,
+    include_archived: bool = False,
+    search:       str | None = Query(None, description="Search project name or code"),
+    skip:         int = Query(0, ge=0),
+    limit:        int = Query(100, ge=1, le=500),
+):
+    q = db.query(Project)
+    if status:
+        q = q.filter(Project.status == status)
+    if archived is not None:
+        q = q.filter(Project.is_archived == archived)
+    elif not include_archived:
+        q = q.filter(Project.is_archived == False)  # noqa: E712
+    if search:
+        q = q.filter(or_(
+            Project.name.ilike(f"%{search}%"),
+            Project.code.ilike(f"%{search}%"),
+        ))
+    total = q.count()
+    items = q.order_by(Project.code).offset(skip).limit(limit).all()
+    return {"items": items, "total": total}
+
+
+@router.post("", response_model=ProjectResponse, status_code=201,
+             summary="Create a project")
+def create_project(
+    request:      Request,
+    payload:      ProjectCreate,
+    current_user: Annotated[object, Depends(require_role(*_write_roles))],
+    db:           Annotated[Session, Depends(get_db)],
+):
+    if db.query(Project).filter(Project.code == payload.code).first():
+        raise HTTPException(status_code=409, detail=f"Project code '{payload.code}' already exists")
+
+    project = Project(**payload.model_dump())
+    db.add(project)
+    db.flush()
+
+    write_audit(db, "Project", project.id, "CREATE",
+                changed_by=current_user.id, ip_address=get_client_ip(request),
+                after=model_to_dict(project))
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.get("/{project_id}", response_model=ProjectResponse)
+def get_project(
+    project_id:   int,
+    current_user: CurrentUser,
+    db:           Annotated[Session, Depends(get_db)],
+):
+    return _get_or_404(project_id, db)
+
+
+@router.get("/{project_id}/documents", response_model=list[ProjectDocumentResponse])
+def list_project_documents(
+    project_id:   int,
+    current_user: CurrentUser,
+    db:           Annotated[Session, Depends(get_db)],
+):
+    _get_or_404(project_id, db)
+    return (
+        db.query(ProjectDocument)
+        .filter(ProjectDocument.project_id == project_id)
+        .order_by(ProjectDocument.doc_type, ProjectDocument.title)
+        .all()
+    )
+
+
+@router.get("/{project_id}/documents/{doc_id}/file")
+def view_project_document(
+    project_id:   int,
+    doc_id:       int,
+    current_user: CurrentUser,
+    db:           Annotated[Session, Depends(get_db)],
+):
+    doc = (
+        db.query(ProjectDocument)
+        .filter(ProjectDocument.id == doc_id, ProjectDocument.project_id == project_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project document not found")
+    path = Path(doc.file_path)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Original file is missing")
+    return FileResponse(path, filename=path.name)
+
+
+@router.patch("/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id:   int,
+    request:      Request,
+    payload:      ProjectUpdate,
+    current_user: Annotated[object, Depends(require_role(*_write_roles))],
+    db:           Annotated[Session, Depends(get_db)],
+):
+    project = _get_or_404(project_id, db)
+    before  = model_to_dict(project)
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(project, field, value)
+
+    write_audit(db, "Project", project.id, "UPDATE",
+                changed_by=current_user.id, ip_address=get_client_ip(request),
+                before=before, after=model_to_dict(project))
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.delete("/{project_id}", response_model=MessageResponse)
+def delete_project(
+    project_id:   int,
+    request:      Request,
+    current_user: Annotated[object, Depends(require_role(RoleName.SUPER_ADMIN, RoleName.MD))],
+    db:           Annotated[Session, Depends(get_db)],
+):
+    """Soft-delete by setting status=CANCELLED. Hard delete not permitted."""
+    project = _get_or_404(project_id, db)
+    before  = model_to_dict(project)
+    project.status = ProjectStatus.CANCELLED
+    write_audit(db, "Project", project.id, "CANCEL",
+                changed_by=current_user.id, ip_address=get_client_ip(request),
+                before=before, after=model_to_dict(project))
+    db.commit()
+    return MessageResponse(message=f"Project {project.code} cancelled")
+
+
+# ─── Excel / CSV Import ──────────────────────────────────────────────────────
+
+@router.post("/import-excel", response_model=ProjectImportResult,
+             summary="Bulk-import projects from Excel or CSV")
+def import_projects(
+    request:      Request,
+    file:         UploadFile = File(...),
+    current_user: Annotated[object, Depends(require_role(*_write_roles))] = None,
+    db:           Annotated[Session, Depends(get_db)] = None,
+):
+    content_type = file.content_type or ""
+    filename     = (file.filename or "").lower()
+
+    try:
+        raw = file.file.read()
+        if filename.endswith(".csv") or "csv" in content_type:
+            df = pd.read_csv(io.BytesIO(raw))
+        else:
+            df = pd.read_excel(io.BytesIO(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot parse file: {exc}")
+
+    # Normalise column names
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    required = {"code", "name", "contract_value"}
+    missing  = required - set(df.columns)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing required columns: {missing}. "
+                   "Expected: code, name, contract_value[, start_date, end_date, status]",
+        )
+
+    imported = 0
+    skipped  = 0
+    errors:  list[dict] = []
+    now      = datetime.now(timezone.utc)
+
+    for idx, row in df.iterrows():
+        row_num = int(idx) + 2  # 1-indexed + header row
+        try:
+            code = str(row["code"]).strip().upper()
+            name = str(row["name"]).strip()
+
+            try:
+                contract_value = Decimal(str(row["contract_value"])).quantize(Decimal("0.01"))
+            except InvalidOperation:
+                raise ValueError(f"Invalid contract_value: {row['contract_value']}")
+
+            if db.query(Project).filter(Project.code == code).first():
+                skipped += 1
+                continue
+
+            def _parse_date(val) -> datetime | None:
+                if pd.isna(val) or str(val).strip() in ("", "nan", "None"):
+                    return None
+                try:
+                    return pd.to_datetime(val).to_pydatetime().replace(tzinfo=timezone.utc)
+                except Exception:
+                    return None
+
+            start_date = _parse_date(row.get("start_date"))
+            end_date   = _parse_date(row.get("end_date"))
+
+            raw_status = str(row.get("status", "active")).strip().lower()
+            try:
+                proj_status = ProjectStatus(raw_status)
+            except ValueError:
+                proj_status = ProjectStatus.ACTIVE
+
+            project = Project(
+                code=code, name=name, contract_value=contract_value,
+                start_date=start_date, end_date=end_date,
+                status=proj_status, imported_at=now,
+                currency=str(row.get("currency", "IDR") or "IDR").strip().upper()[:3],
+            )
+            db.add(project)
+            db.flush()
+            write_audit(db, "Project", project.id, "IMPORT",
+                        changed_by=current_user.id, ip_address=get_client_ip(request),
+                        after=model_to_dict(project))
+            imported += 1
+
+        except Exception as exc:
+            errors.append({"row": row_num, "error": str(exc)})
+
+    db.commit()
+    return ProjectImportResult(imported=imported, skipped=skipped, errors=errors)

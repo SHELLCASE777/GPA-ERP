@@ -23,17 +23,42 @@ DEFAULT_MENUS = [
     ("settings", "Settings", "Vault", "/settings", "Users, roles, branding, configuration", 90),
     ("vault", "Vault", "Vault", "/vault", "Approval matrix, cost codes, cost centres, audit log", 100),
     ("backend_admin", "Backend Admin", "System", "/admin", "Backend maintenance console", 110),
+    # HRIS modules
+    ("hris_dashboard",   "HRIS Dashboard",    "HRIS", "/hris",             "Headcount KPIs, employment mix, org overview", 200),
+    ("hris_employees",   "Data Karyawan",     "HRIS", "/hris/employees",   "Employee master, departments, job grades",    210),
+    ("hris_attendance",  "Absensi & Lembur",  "HRIS", "/hris/attendance",  "Daily attendance, geolocation clock-in, overtime", 220),
+    ("hris_leave",       "Cuti & Izin",       "HRIS", "/hris/leave",       "Leave requests, balances, approval flow",     230),
+    ("hris_payroll",     "Penggajian",        "HRIS", "/hris/payroll",     "Payroll run, BPJS, PPh21, slip gaji",        240),
+    ("hris_recruitment", "Rekrutmen",         "HRIS", "/hris/recruitment", "Job postings, applicant pipeline, onboarding", 250),
 ]
 OBSOLETE_MENU_KEYS = {"expenses", "procurement"}
 
 ROLE_PRESETS: dict[str, set[str]] = {
     "SUPER_ADMIN": {key for key, *_ in DEFAULT_MENUS},
-    "MD": {"dashboard", "action_center", "project_command", "revenue_ar", "spending", "inventory", "legal", "reports"},
-    "PM": {"dashboard", "action_center", "project_command", "spending", "inventory", "legal", "reports"},
-    "COST_CONTROL": {"dashboard", "action_center", "project_command", "spending", "petty_cash", "inventory", "reports"},
-    "FINANCE": {"dashboard", "action_center", "project_command", "revenue_ar", "spending", "petty_cash", "reports"},
-    "GA": {"dashboard", "action_center", "spending", "petty_cash", "inventory"},
-    "STAFF": {"dashboard", "action_center", "spending"},
+    "MD": {
+        "dashboard", "action_center", "project_command", "revenue_ar", "spending", "inventory", "legal", "reports",
+        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave", "hris_payroll", "hris_recruitment",
+    },
+    "PM": {
+        "dashboard", "action_center", "project_command", "spending", "inventory", "legal", "reports",
+        "hris_dashboard", "hris_attendance", "hris_leave",
+    },
+    "COST_CONTROL": {
+        "dashboard", "action_center", "project_command", "spending", "petty_cash", "inventory", "reports",
+        "hris_dashboard",
+    },
+    "FINANCE": {
+        "dashboard", "action_center", "project_command", "revenue_ar", "spending", "petty_cash", "reports",
+        "hris_dashboard", "hris_payroll",
+    },
+    "GA": {
+        "dashboard", "action_center", "spending", "petty_cash", "inventory",
+        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave", "hris_recruitment",
+    },
+    "STAFF": {
+        "dashboard", "action_center", "spending",
+        "hris_attendance", "hris_leave",
+    },
 }
 
 

@@ -694,3 +694,139 @@ class Notification(Base):
 
     def __repr__(self) -> str:
         return f"<Notification {self.id} user={self.user_id} read={self.is_read}>"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HRIS — Human Resource Information System
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── HRIS Enumerations ────────────────────────────────────────────────────────
+
+class EmploymentType(str, enum.Enum):
+    TETAP     = "Tetap"       # Permanent (PKWTT)
+    PKWT      = "PKWT"        # Fixed-term contract
+    OUTSOURCE = "Outsource"   # Third-party outsourced
+
+
+class EmployeeStatus(str, enum.Enum):
+    ACTIVE      = "active"
+    PROBATION   = "probation"
+    LEAVE       = "leave"         # extended leave
+    TERMINATED  = "terminated"
+
+
+class EmpDocType(str, enum.Enum):
+    KTP      = "KTP"
+    NPWP     = "NPWP"
+    BPJS_TK  = "BPJS_TK"
+    BPJS_KES = "BPJS_KES"
+    IJAZAH   = "IJAZAH"
+    SKCK     = "SKCK"
+    OTHER    = "OTHER"
+
+
+# ─── Department ───────────────────────────────────────────────────────────────
+
+class Department(Base, TimestampMixin):
+    __tablename__ = "hris_departments"
+
+    id:        Mapped[int]      = mapped_column(Integer, primary_key=True)
+    code:      Mapped[str]      = mapped_column(String(50), unique=True, nullable=False, index=True)
+    name:      Mapped[str]      = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[int|None] = mapped_column(ForeignKey("hris_departments.id"), nullable=True)
+    is_active: Mapped[bool]     = mapped_column(Boolean, default=True, nullable=False)
+
+    parent:   Mapped["Department|None"]  = relationship("Department", remote_side="Department.id", back_populates="children")
+    children: Mapped[list["Department"]] = relationship("Department", back_populates="parent")
+    employees: Mapped[list["Employee"]]  = relationship("Employee", back_populates="department")
+
+    def __repr__(self) -> str:
+        return f"<Department {self.code}>"
+
+
+# ─── JobGrade ─────────────────────────────────────────────────────────────────
+
+class JobGrade(Base, TimestampMixin):
+    __tablename__ = "hris_job_grades"
+
+    id:        Mapped[int]  = mapped_column(Integer, primary_key=True)
+    code:      Mapped[str]  = mapped_column(String(50), unique=True, nullable=False, index=True)
+    name:      Mapped[str]  = mapped_column(String(255), nullable=False)
+    level:     Mapped[int]  = mapped_column(Integer, nullable=False, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    employees: Mapped[list["Employee"]] = relationship("Employee", back_populates="grade")
+
+    def __repr__(self) -> str:
+        return f"<JobGrade {self.code} L{self.level}>"
+
+
+# ─── Employee ─────────────────────────────────────────────────────────────────
+
+class Employee(Base, TimestampMixin):
+    __tablename__ = "hris_employees"
+
+    id:             Mapped[int]            = mapped_column(Integer, primary_key=True)
+    employee_no:    Mapped[str]            = mapped_column(String(50), unique=True, nullable=False, index=True)
+    full_name:      Mapped[str]            = mapped_column(String(255), nullable=False)
+    nik:            Mapped[str|None]       = mapped_column(String(16), unique=True, nullable=True)
+    npwp:           Mapped[str|None]       = mapped_column(String(20), nullable=True)
+    email:          Mapped[str|None]       = mapped_column(String(320), nullable=True)
+    phone:          Mapped[str|None]       = mapped_column(String(20), nullable=True)
+    tipe:           Mapped[EmploymentType] = mapped_column(
+        SAEnum(EmploymentType, values_callable=lambda x: [e.value for e in x]), nullable=False
+    )
+    status:         Mapped[EmployeeStatus] = mapped_column(
+        SAEnum(EmployeeStatus, values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=EmployeeStatus.ACTIVE
+    )
+    dept_id:        Mapped[int|None]       = mapped_column(ForeignKey("hris_departments.id"), nullable=True)
+    grade_id:       Mapped[int|None]       = mapped_column(ForeignKey("hris_job_grades.id"), nullable=True)
+    site:           Mapped[str|None]       = mapped_column(String(255), nullable=True)
+    join_date:      Mapped[date|None]      = mapped_column(Date, nullable=True)
+    end_date:       Mapped[date|None]      = mapped_column(Date, nullable=True)
+    bank_name:      Mapped[str|None]       = mapped_column(String(100), nullable=True)
+    bank_account:   Mapped[str|None]       = mapped_column(String(50), nullable=True)
+    bpjs_tk_no:     Mapped[str|None]       = mapped_column(String(30), nullable=True)
+    bpjs_kes_no:    Mapped[str|None]       = mapped_column(String(30), nullable=True)
+    user_id:        Mapped[int|None]       = mapped_column(ForeignKey("users.id"), unique=True, nullable=True)
+    photo_url:      Mapped[str|None]       = mapped_column(String(500), nullable=True)
+    # Face recognition embedding (JSONB list of floats)
+    face_embedding: Mapped[dict|None]      = mapped_column(JSONB, nullable=True)
+
+    department: Mapped["Department|None"]       = relationship("Department", back_populates="employees")
+    grade:      Mapped["JobGrade|None"]         = relationship("JobGrade", back_populates="employees")
+    user:       Mapped["User|None"]             = relationship("User", foreign_keys=[user_id])
+    documents:  Mapped[list["EmployeeDocument"]] = relationship(
+        "EmployeeDocument", back_populates="employee", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_hris_employees_dept",   "dept_id"),
+        Index("ix_hris_employees_status", "status"),
+        Index("ix_hris_employees_tipe",   "tipe"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Employee {self.employee_no} {self.full_name}>"
+
+
+# ─── EmployeeDocument ─────────────────────────────────────────────────────────
+
+class EmployeeDocument(Base, TimestampMixin):
+    __tablename__ = "hris_employee_documents"
+
+    id:          Mapped[int]        = mapped_column(Integer, primary_key=True)
+    employee_id: Mapped[int]        = mapped_column(ForeignKey("hris_employees.id"), nullable=False, index=True)
+    doc_type:    Mapped[EmpDocType] = mapped_column(
+        SAEnum(EmpDocType, values_callable=lambda x: [e.value for e in x]), nullable=False
+    )
+    file_url:    Mapped[str]        = mapped_column(String(500), nullable=False)
+    uploaded_at: Mapped[datetime]   = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    employee: Mapped["Employee"] = relationship("Employee", back_populates="documents")
+
+    def __repr__(self) -> str:
+        return f"<EmployeeDocument {self.doc_type} emp={self.employee_id}>"

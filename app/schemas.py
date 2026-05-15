@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 from app.models import (
     ARStatus, CostCodeCategory, DocStatus, DocType,
     ExpenseStatus, ItemCategory, PettyCashReportStatus, ProjectStatus, RoleName, TxnType,
+    EmpDocType, EmployeeStatus, EmploymentType,
 )
 
 
@@ -618,3 +619,140 @@ class MessageResponse(BaseModel):
 class PaginatedResponse(BaseModel, Generic[T]):
     items: list[T]
     total: int
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HRIS Schemas — Phase H1: Data Karyawan & Organisasi
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Department ──────────────────────────────────────────────────────────────
+
+class DepartmentCreate(BaseModel):
+    code:      str  = Field(min_length=1, max_length=50)
+    name:      str  = Field(min_length=1, max_length=255)
+    parent_id: int | None = None
+    is_active: bool = True
+
+
+class DepartmentUpdate(BaseModel):
+    code:      str | None  = Field(None, min_length=1, max_length=50)
+    name:      str | None  = Field(None, min_length=1, max_length=255)
+    parent_id: int | None  = None
+    is_active: bool | None = None
+
+
+class DepartmentResponse(ORMBase):
+    id:        int
+    code:      str
+    name:      str
+    parent_id: int | None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+# ─── JobGrade ────────────────────────────────────────────────────────────────
+
+class JobGradeCreate(BaseModel):
+    code:      str = Field(min_length=1, max_length=50)
+    name:      str = Field(min_length=1, max_length=255)
+    level:     int = Field(ge=1, le=20)
+    is_active: bool = True
+
+
+class JobGradeUpdate(BaseModel):
+    code:      str | None  = Field(None, min_length=1, max_length=50)
+    name:      str | None  = Field(None, min_length=1, max_length=255)
+    level:     int | None  = Field(None, ge=1, le=20)
+    is_active: bool | None = None
+
+
+class JobGradeResponse(ORMBase):
+    id:        int
+    code:      str
+    name:      str
+    level:     int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+# ─── Employee ────────────────────────────────────────────────────────────────
+
+class EmployeeCreate(BaseModel):
+    employee_no:  str              = Field(min_length=1, max_length=50)
+    full_name:    str              = Field(min_length=2, max_length=255)
+    nik:          str | None       = Field(None, max_length=16)
+    npwp:         str | None       = Field(None, max_length=20)
+    email:        str | None       = Field(None, max_length=320)
+    phone:        str | None       = Field(None, max_length=20)
+    tipe:         EmploymentType
+    status:       EmployeeStatus   = EmployeeStatus.ACTIVE
+    dept_id:      int | None       = None
+    grade_id:     int | None       = None
+    site:         str | None       = Field(None, max_length=255)
+    join_date:    date | None      = None
+    end_date:     date | None      = None
+    bank_name:    str | None       = Field(None, max_length=100)
+    bank_account: str | None       = Field(None, max_length=50)
+    bpjs_tk_no:   str | None       = Field(None, max_length=30)
+    bpjs_kes_no:  str | None       = Field(None, max_length=30)
+    user_id:      int | None       = None
+
+
+class EmployeeUpdate(BaseModel):
+    full_name:    str | None            = Field(None, min_length=2, max_length=255)
+    nik:          str | None            = Field(None, max_length=16)
+    npwp:         str | None            = Field(None, max_length=20)
+    email:        str | None            = Field(None, max_length=320)
+    phone:        str | None            = Field(None, max_length=20)
+    tipe:         EmploymentType | None = None
+    status:       EmployeeStatus | None = None
+    dept_id:      int | None            = None
+    grade_id:     int | None            = None
+    site:         str | None            = Field(None, max_length=255)
+    join_date:    date | None           = None
+    end_date:     date | None           = None
+    bank_name:    str | None            = Field(None, max_length=100)
+    bank_account: str | None            = Field(None, max_length=50)
+    bpjs_tk_no:   str | None            = Field(None, max_length=30)
+    bpjs_kes_no:  str | None            = Field(None, max_length=30)
+    user_id:      int | None            = None
+
+
+class EmployeeDocumentResponse(ORMBase):
+    id:          int
+    employee_id: int
+    doc_type:    EmpDocType
+    file_url:    str
+    uploaded_at: datetime
+    created_at:  datetime
+
+
+class EmployeeResponse(ORMBase):
+    id:           int
+    employee_no:  str
+    full_name:    str
+    nik:          str | None
+    npwp:         str | None
+    email:        str | None
+    phone:        str | None
+    tipe:         EmploymentType
+    status:       EmployeeStatus
+    dept_id:      int | None
+    grade_id:     int | None
+    site:         str | None
+    join_date:    date | None
+    end_date:     date | None
+    bank_name:    str | None
+    bank_account: str | None
+    bpjs_tk_no:   str | None
+    bpjs_kes_no:  str | None
+    user_id:      int | None
+    photo_url:    str | None
+    department:   DepartmentResponse | None = None
+    grade:        JobGradeResponse | None   = None
+    user:         UserSummary | None        = None
+    documents:    list[EmployeeDocumentResponse] = []
+    created_at:   datetime
+    updated_at:   datetime

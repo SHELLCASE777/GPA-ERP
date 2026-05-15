@@ -45,5 +45,12 @@ docs/package-lock.json
 # Generated slide images (QA artifacts)
 docs/deck_slides/
 
+# Generated/actual project documents (PDFs, PPTX, images)
+docs/*.pdf
+docs/*.pptx
+app/templates/*.pdf
+app/templates/*.png
+app/templates/*.jpg
+
 # Alembic — keep versions, ignore env
 alembic/versions/__pycache__/

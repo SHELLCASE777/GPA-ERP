@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision: str = 'b4b2538d71e3'
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = 'a0_initial_schema'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

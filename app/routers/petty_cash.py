@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import io
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
+import openpyxl
+from openpyxl.styles import Alignment, Font, PatternFill
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy.orm import Session
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session, joinedload
 
 from app.audit import model_to_dict, write_audit
 from app.database import get_db
@@ -96,6 +100,91 @@ def list_reports(
     if report_status:
         q = q.filter(PettyCashReport.status == report_status)
     return q.order_by(PettyCashReport.id.desc()).offset(skip).limit(limit).all()
+
+
+_PC_EXPORT_ROLES = (RoleName.GA, RoleName.FINANCE, RoleName.SUPER_ADMIN)
+_PC_EXPORT_HEADER_FILL  = PatternFill(fill_type="solid", fgColor="1E293B")
+_PC_EXPORT_HEADER_FONT  = Font(bold=True, color="FFFFFF")
+_PC_EXPORT_HEADER_ALIGN = Alignment(horizontal="center", vertical="center")
+
+
+@router.get("/export", summary="Export petty cash report lines to XLSX")
+def export_petty_cash(
+    current_user: Annotated[object, Depends(require_role(*_PC_EXPORT_ROLES))],
+    db:           Annotated[Session, Depends(get_db)],
+    report_id:    int | None = Query(None),
+    date_from:    str | None = Query(None),
+    date_to:      str | None = Query(None),
+):
+    q = (
+        db.query(PettyCashReport)
+        .options(
+            joinedload(PettyCashReport.lines),
+        )
+    )
+    if report_id:
+        q = q.filter(PettyCashReport.id == report_id)
+    if date_from:
+        try:
+            q = q.filter(PettyCashReport.created_at >= datetime.fromisoformat(date_from))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from format, use ISO 8601")
+    if date_to:
+        try:
+            q = q.filter(PettyCashReport.created_at <= datetime.fromisoformat(date_to))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to format, use ISO 8601")
+
+    reports = q.order_by(PettyCashReport.id.desc()).all()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Rekap Petty Cash"
+
+    headers = ["No", "Tanggal", "Nama Laporan", "Keterangan", "Kategori", "Jumlah", "Status"]
+
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.fill      = _PC_EXPORT_HEADER_FILL
+        cell.font      = _PC_EXPORT_HEADER_FONT
+        cell.alignment = _PC_EXPORT_HEADER_ALIGN
+
+    row_idx = 2
+    seq = 1
+    for report in reports:
+        for line in report.lines:
+            tanggal = line.spent_on.isoformat() if line.spent_on else (
+                report.created_at.strftime("%Y-%m-%d") if report.created_at else ""
+            )
+            ws.cell(row=row_idx, column=1, value=seq)
+            ws.cell(row=row_idx, column=2, value=tanggal)
+            ws.cell(row=row_idx, column=3, value=report.title or report.report_no)
+            ws.cell(row=row_idx, column=4, value=line.description)
+            ws.cell(row=row_idx, column=5, value=report.month)
+            ws.cell(row=row_idx, column=6, value=float(line.amount))
+            ws.cell(row=row_idx, column=7, value=report.status.value if report.status else "")
+            row_idx += 1
+            seq += 1
+
+    col_widths = [len(h) for h in headers]
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+        for cell in row:
+            if cell.value is not None:
+                col_widths[cell.column - 1] = max(col_widths[cell.column - 1], len(str(cell.value)))
+    for col_idx, width in enumerate(col_widths, start=1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = width + 4
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    from datetime import date
+    filename = f"petty-cash-{date.today().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{report_id}", response_model=PettyCashReportResponse)

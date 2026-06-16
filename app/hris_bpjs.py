@@ -6,8 +6,8 @@ Rates per PP 44/2015 (TK) and Perpres 82/2018 (Kes) as of 2024.
 
 BPJS Ketenagakerjaan:
     JHT (Jaminan Hari Tua):
-        Employee:  3.7%
-        Employer:  2.0%
+        Employee:  2.0%
+        Employer:  3.7%
     JP  (Jaminan Pensiun):
         Employee:  1.0%   (capped at salary ceiling Rp 9,559,600 / month in 2024)
         Employer:  2.0%
@@ -30,8 +30,8 @@ KES_SALARY_CEILING = Decimal("12_000_000")  # max wage for BPJS Kes contribution
 
 # ─── Rates ────────────────────────────────────────────────────────────────────
 
-JHT_EMP_RATE    = Decimal("0.037")
-JHT_EMPLOYER_RATE = Decimal("0.020")
+JHT_EMP_RATE    = Decimal("0.020")   # employee: 2%
+JHT_EMPLOYER_RATE = Decimal("0.037") # employer: 3.7%
 
 JP_EMP_RATE     = Decimal("0.010")
 JP_EMPLOYER_RATE = Decimal("0.020")

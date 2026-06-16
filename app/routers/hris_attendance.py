@@ -6,13 +6,18 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
+import math
 import uuid
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 
@@ -21,8 +26,9 @@ from app.database import get_db
 from app.dependencies import CurrentUser, get_client_ip, require_role
 from app.models import (
     AttendanceRecord, AttendanceSource,
-    Employee, LeaveBalance, LeaveRequest, LeaveRequestStatus, LeaveType,
-    RoleName,
+    Employee, LeaveBalance, LeaveCategory, LeaveRequest, LeaveRequestStatus, LeaveType,
+    RoleName, WorkGroup, WorkLocation, WorkLocationType,
+    OvertimeRequest, OvertimeRequestStatus, HolidayCalendar,
 )
 from app.notify import push, push_to_role
 from app.schemas import (
@@ -30,6 +36,9 @@ from app.schemas import (
     LeaveActionRequest, LeaveBalanceResponse, LeaveRequestCreate,
     LeaveRequestResponse, LeaveTypeCreate, LeaveTypeResponse,
     MessageResponse, PaginatedResponse,
+    WorkLocationCreate, WorkLocationResponse, WorkLocationUpdate,
+    OvertimeRequestCreate, OvertimeRequestResponse, OvertimeActionRequest,
+    LeaveCalendarItem,
 )
 
 router = APIRouter(prefix="/hris", tags=["HRIS – Attendance & Leave"])
@@ -58,7 +67,11 @@ def _calculate_overtime(
       Weekday: first 8h regular, OT starts after 8h
       Weekend/Holiday: all hours are OT
     """
-    total_hours = Decimal(str((clock_out - clock_in).total_seconds() / 3600))
+    MAX_DAILY_HOURS = Decimal("24")  # sanity cap — forgot to clock out guard
+    total_hours = min(
+        Decimal(str((clock_out - clock_in).total_seconds() / 3600)),
+        MAX_DAILY_HOURS,
+    )
     REGULAR_HOURS = Decimal("8")
 
     if is_holiday:
@@ -76,6 +89,58 @@ def _is_weekend(d: date) -> bool:
     return d.weekday() >= 5  # Saturday=5, Sunday=6
 
 
+# ─── Geolocation helpers ──────────────────────────────────────────────────────
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return great-circle distance in metres between two GPS points."""
+    R = 6_371_000  # Earth radius in metres
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi       = math.radians(lat2 - lat1)
+    dlambda    = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _check_location(
+    db: Session,
+    latitude: float,
+    longitude: float,
+    assigned_location: "WorkLocation | None" = None,
+) -> tuple[bool, "WorkLocation | None", float]:
+    """
+    Check GPS coords against WorkLocations.
+
+    If the employee has an assigned work_location, validate ONLY against that
+    location — so a Jakarta employee can't clock-in at a Berau site and vice versa.
+
+    If no location is assigned, fall back to checking all active locations
+    (previous behaviour — matches the nearest one within any radius).
+
+    Never blocks clock-in — just records the result for HR review.
+    """
+    if assigned_location is not None:
+        # Validate strictly against the employee's assigned location only
+        locations = [assigned_location]
+    else:
+        locations = db.query(WorkLocation).filter(WorkLocation.is_active == True).all()
+
+    best: WorkLocation | None = None
+    best_dist = float("inf")
+    for loc in locations:
+        dist = _haversine(latitude, longitude, float(loc.latitude), float(loc.longitude))
+        if dist <= loc.radius_meters and dist < best_dist:
+            best, best_dist = loc, dist
+    # If no match found, compute distance to nearest for reporting
+    if best is None:
+        nearest_dist = float("inf")
+        for loc in locations:
+            dist = _haversine(latitude, longitude, float(loc.latitude), float(loc.longitude))
+            if dist < nearest_dist:
+                nearest_dist = dist
+        return False, None, nearest_dist if nearest_dist != float("inf") else 0.0
+    return True, best, best_dist
+
+
 # ─── Attendance: clock-in (mobile, geolocation + selfie) ─────────────────────
 
 @router.post("/attendance/clock-in", response_model=AttendanceRecordResponse,
@@ -83,9 +148,9 @@ def _is_weekend(d: date) -> bool:
 async def clock_in(
     current_user: CurrentUser,
     db:           Annotated[Session, Depends(get_db)],
-    latitude:     float              = Form(...),
-    longitude:    float              = Form(...),
-    accuracy:     float              = Form(100.0),
+    latitude:     float | None        = Form(None),
+    longitude:    float | None        = Form(None),
+    accuracy:     float | None        = Form(None),
     employee_id:  int | None         = Form(None),
     selfie:       UploadFile | None  = File(None),
 ):
@@ -110,11 +175,29 @@ async def clock_in(
 
     today      = datetime.now(timezone.utc).date()
     now        = datetime.now(timezone.utc)
-    face_verified   = False
+    face_detected: bool             = False
     face_confidence: Decimal | None = None
-    selfie_url: str | None = None
+    selfie_url: str | None          = None
+    location_ok: bool | None        = None
+    location_distance_m: Decimal | None = None
 
-    # Process selfie
+    # ── Geolocation validation (soft — never blocks clock-in) ─────────────────
+    # If the employee has an assigned work location, validate only against that.
+    # Otherwise fall back to checking all active locations.
+    assigned_wl: WorkLocation | None = emp.work_location if emp.work_location_id else None
+    matched_loc: WorkLocation | None = None
+    if latitude is not None and longitude is not None:
+        ok, matched_loc, dist = _check_location(db, latitude, longitude, assigned_wl)
+        location_ok          = ok
+        location_distance_m  = Decimal(str(round(dist, 1)))
+        if not ok and emp.work_location:
+            push_to_role(db, RoleName.GA,
+                         "Absensi: Lokasi Di Luar Radius",
+                         f"{emp.full_name} clock-in dari jarak "
+                         f"{dist:.0f}m (radius: {emp.work_location.radius_meters}m dari {emp.work_location.name})",
+                         "/hris/attendance")
+
+    # Process selfie — detect whether a face is present (no identity matching)
     if selfie:
         selfie_bytes = await selfie.read()
         ext      = Path(selfie.filename or "selfie").suffix or ".jpg"
@@ -123,15 +206,13 @@ async def clock_in(
         dest.write_bytes(selfie_bytes)
         selfie_url = f"/uploads/selfies/{filename}"
 
-        # Face verification (if embedding registered)
-        if emp.face_embedding:
-            try:
-                from app.hris_face import verify_face
-                verified, confidence = verify_face(emp.face_embedding, selfie_bytes)
-                face_verified   = verified
-                face_confidence = Decimal(str(confidence))
-            except Exception:
-                pass  # log but don't block clock-in
+        try:
+            from app.hris_face import detect_face
+            face_detected, conf = detect_face(selfie_bytes)
+            face_confidence = Decimal(str(conf))
+        except Exception as exc:
+            logger.warning("Face detection error during clock-in: %s", exc)
+            # Don't block clock-in if detection fails
 
     # Upsert attendance record (one per employee per day)
     record = db.query(AttendanceRecord).filter(
@@ -140,41 +221,53 @@ async def clock_in(
     ).first()
 
     if record:
-        # Already clocked in — update selfie/geo if re-submitted
+        # Already clocked in — update selfie/geo if re-submitted before clock-out
         if selfie_url:
-            record.selfie_url     = selfie_url
-            record.face_verified  = face_verified
+            record.selfie_url      = selfie_url
+            record.face_verified   = face_detected
             record.face_confidence = face_confidence
-        record.latitude  = Decimal(str(latitude))
-        record.longitude = Decimal(str(longitude))
-        record.accuracy  = Decimal(str(accuracy))
+        if latitude is not None:
+            record.latitude                  = Decimal(str(latitude))
+            record.longitude                 = Decimal(str(longitude))
+            record.accuracy                  = Decimal(str(accuracy)) if accuracy is not None else None
+            record.location_ok               = location_ok
+            record.location_distance_m       = location_distance_m
+            record.matched_work_location_id  = matched_loc.id if matched_loc else None
     else:
         record = AttendanceRecord(
-            employee_id    = emp.id,
-            date           = today,
-            clock_in       = now,
-            source         = AttendanceSource.MOBILE,
-            latitude       = Decimal(str(latitude)),
-            longitude      = Decimal(str(longitude)),
-            accuracy       = Decimal(str(accuracy)),
-            selfie_url     = selfie_url,
-            face_verified  = face_verified,
-            face_confidence = face_confidence,
+            employee_id              = emp.id,
+            date                     = today,
+            clock_in                 = now,
+            source                   = AttendanceSource.MOBILE,
+            latitude                 = Decimal(str(latitude)) if latitude is not None else None,
+            longitude                = Decimal(str(longitude)) if longitude is not None else None,
+            accuracy                 = Decimal(str(accuracy)) if accuracy is not None else None,
+            location_ok              = location_ok,
+            location_distance_m      = location_distance_m,
+            matched_work_location_id = matched_loc.id if matched_loc else None,
+            selfie_url               = selfie_url,
+            face_verified            = face_detected,
+            face_confidence          = face_confidence,
         )
         db.add(record)
 
     db.flush()
     write_audit(db, "AttendanceRecord", record.id, "CLOCK_IN",
-                changed_by=current_user.id, after={"employee_id": emp.id, "date": str(today),
-                "face_verified": face_verified, "face_confidence": str(face_confidence or "")})
+                changed_by=current_user.id,
+                after={"employee_id": emp.id, "date": str(today),
+                       "face_detected": face_detected,
+                       "face_confidence": str(face_confidence or ""),
+                       "has_selfie": selfie_url is not None,
+                       "location_ok": location_ok,
+                       "location_distance_m": str(location_distance_m or "")})
     db.commit()
     db.refresh(record)
 
-    # Warn if face not verified
-    if selfie and emp.face_embedding and not face_verified:
+    # Flag to HR if selfie was submitted but no face was detected
+    if selfie and not face_detected:
         push_to_role(db, RoleName.GA,
-                     "Absensi: Wajah Tidak Terverifikasi",
-                     f"{emp.full_name} clock-in tapi wajah tidak cocok (confidence: {face_confidence})",
+                     "Absensi: Wajah Tidak Terdeteksi",
+                     f"{emp.full_name} clock-in namun tidak ada wajah pada selfie",
                      "/hris/attendance")
         db.commit()
 
@@ -236,6 +329,55 @@ def clock_out(
     db.commit()
     db.refresh(record)
     return record
+
+
+# ─── DEBUG: reset today's attendance ─────────────────────────────────────────
+
+@router.delete("/attendance/debug-reset", status_code=200,
+               summary="[DEBUG] Delete today's attendance record — testing only",
+               include_in_schema=False)
+def debug_reset_attendance(
+    current_user: CurrentUser,
+    db:           Annotated[Session, Depends(get_db)],
+    employee_id:  int | None = Query(None, description="Target employee (SA/HR only; omit to use own)"),
+):
+    """
+    Deletes today's AttendanceRecord so the clock-in flow can be retested.
+    Only available when DEBUG=True.
+    SUPER_ADMIN / GA / MD can reset any employee's record via `employee_id`.
+    """
+    from app.config import get_settings as _gs
+    if not _gs().DEBUG:
+        raise HTTPException(404, "Not found")
+    today = date.today()
+
+    # Resolve target employee
+    if employee_id is not None:
+        if current_user.role.name not in _hr_roles:
+            raise HTTPException(403, "Only HR roles can reset other employees' attendance")
+        emp = db.query(Employee).filter(Employee.id == employee_id).first()
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+    else:
+        emp = db.query(Employee).filter(Employee.user_id == current_user.id).first()
+        if not emp:
+            raise HTTPException(404, "No employee record linked to your account")
+
+    record = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.employee_id == emp.id,
+            func.date(AttendanceRecord.clock_in) == today,
+        )
+        .first()
+    )
+
+    if not record:
+        return {"detail": f"No attendance record found for {emp.full_name} today ({today})"}
+
+    db.delete(record)
+    db.commit()
+    return {"detail": f"Deleted attendance record #{record.id} for {emp.full_name} ({today})"}
 
 
 # ─── Attendance: manual entry (HR admin) ─────────────────────────────────────
@@ -304,6 +446,7 @@ def list_attendance(
     employee_id:  int | None = Query(None),
     date_from:    date | None = Query(None),
     date_to:      date | None = Query(None),
+    work_group_id: int | None = Query(None),
     skip:         int         = Query(0, ge=0),
     limit:        int         = Query(50, ge=1, le=200),
 ):
@@ -318,6 +461,11 @@ def list_attendance(
             return {"items": [], "total": 0}
     elif employee_id:
         q = q.filter(AttendanceRecord.employee_id == employee_id)
+
+    if work_group_id:
+        q = q.join(Employee, Employee.id == AttendanceRecord.employee_id).filter(
+            Employee.work_group_id == work_group_id
+        )
 
     if date_from:
         q = q.filter(AttendanceRecord.date >= date_from)
@@ -391,31 +539,225 @@ def attendance_summary(
     return result
 
 
-# ─── Face: register template (HR admin) ──────────────────────────────────────
+# ─── Attendance: export (Excel/CSV) ─────────────────────────────────────────
 
-@router.post("/employees/{emp_id}/face", summary="Register employee face template")
-async def register_face_template(
-    emp_id:       int,
-    photo:        UploadFile,
-    current_user: Annotated[CurrentUser, Depends(require_role(*_hr_roles))],
+@router.get("/attendance/export", summary="Export attendance records as Excel")
+def export_attendance(
+    current_user: Annotated[CurrentUser, Depends(require_role(
+        RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.GA, RoleName.FINANCE, RoleName.COST_CONTROL
+    ))],
+    db:           Annotated[Session, Depends(get_db)],
+    date_from:    date | None = Query(None),
+    date_to:      date | None = Query(None),
+    dept_id:      int | None  = Query(None),
+    employee_id:  int | None  = Query(None),
+    fmt:          str         = Query("xlsx", pattern="^(xlsx|csv)$"),
+):
+    """Download attendance records as Excel (.xlsx) or CSV."""
+    q = (
+        db.query(AttendanceRecord)
+        .join(Employee, Employee.id == AttendanceRecord.employee_id)
+    )
+    if date_from:
+        q = q.filter(AttendanceRecord.date >= date_from)
+    if date_to:
+        q = q.filter(AttendanceRecord.date <= date_to)
+    if dept_id:
+        q = q.filter(Employee.dept_id == dept_id)
+    if employee_id:
+        q = q.filter(AttendanceRecord.employee_id == employee_id)
+
+    records = q.order_by(Employee.full_name, AttendanceRecord.date).all()
+
+    # Build employee lookup
+    emp_ids = {r.employee_id for r in records}
+    emp_map = {e.id: e for e in db.query(Employee).filter(Employee.id.in_(emp_ids)).all()}
+    wl_map: dict[int, WorkLocation] = {}
+    wl_ids = {e.work_location_id for e in emp_map.values() if e.work_location_id}
+    if wl_ids:
+        wl_map = {w.id: w for w in db.query(WorkLocation).filter(WorkLocation.id.in_(wl_ids)).all()}
+
+    HEADERS = [
+        "Tanggal", "No. Karyawan", "Nama", "Departemen", "Lokasi Kerja",
+        "Jam Masuk", "Jam Keluar",
+        "Jam Reguler", "OT Weekday", "OT Weekend", "OT Libur",
+        "Total Jam OT", "Sumber",
+        "Latitude", "Longitude", "Akurasi (m)",
+        "Lokasi OK", "Jarak (m)",
+        "Wajah Terdeteksi", "Catatan",
+    ]
+
+    def _fmt_time(dt: datetime | None) -> str:
+        if dt is None:
+            return ""
+        return dt.astimezone().strftime("%H:%M:%S")
+
+    def _fmt_dec(v) -> str:
+        return str(round(float(v), 2)) if v is not None else ""
+
+    rows = []
+    for r in records:
+        emp = emp_map.get(r.employee_id)
+        dept_name = emp.department.name if emp and emp.department else ""
+        wl = wl_map.get(emp.work_location_id) if emp and emp.work_location_id else None
+        ot_total = sum(
+            float(x or 0) for x in [
+                r.hours_overtime_weekday,
+                r.hours_overtime_weekend,
+                r.hours_overtime_holiday,
+            ]
+        )
+        rows.append([
+            str(r.date),
+            emp.employee_no if emp else "",
+            emp.full_name if emp else "",
+            dept_name,
+            wl.name if wl else "",
+            _fmt_time(r.clock_in),
+            _fmt_time(r.clock_out),
+            _fmt_dec(r.hours_regular),
+            _fmt_dec(r.hours_overtime_weekday),
+            _fmt_dec(r.hours_overtime_weekend),
+            _fmt_dec(r.hours_overtime_holiday),
+            str(round(ot_total, 2)),
+            r.source.value if r.source else "",
+            _fmt_dec(r.latitude),
+            _fmt_dec(r.longitude),
+            _fmt_dec(r.accuracy),
+            "Ya" if r.location_ok is True else ("Tidak" if r.location_ok is False else ""),
+            _fmt_dec(r.location_distance_m),
+            "Ya" if r.face_verified else "Tidak",
+            r.note or "",
+        ])
+
+    if fmt == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(HEADERS)
+        writer.writerows(rows)
+        output.seek(0)
+        fname = f"attendance_{date_from or 'all'}_{date_to or 'all'}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+
+    # Excel
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed — use fmt=csv")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Absensi"
+
+    header_fill = PatternFill("solid", fgColor="1E293B")
+    header_font = Font(bold=True, color="FFFFFF")
+    for col_idx, h in enumerate(HEADERS, 1):
+        cell = ws.cell(row=1, column=col_idx, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for row_idx, row_data in enumerate(rows, 2):
+        for col_idx, val in enumerate(row_data, 1):
+            ws.cell(row=row_idx, column=col_idx, value=val)
+
+    # Auto-fit column widths (approximation)
+    for col in ws.columns:
+        max_len = max((len(str(c.value or "")) for c in col), default=8)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 30)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    fname = f"attendance_{date_from or 'all'}_{date_to or 'all'}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ─── Work Locations CRUD ─────────────────────────────────────────────────────
+
+_wl_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.GA)
+
+
+@router.get("/work-locations", response_model=list[WorkLocationResponse],
+            summary="List work locations")
+def list_work_locations(
+    _:           CurrentUser,
+    db:          Annotated[Session, Depends(get_db)],
+    active_only: bool = Query(True),
+):
+    q = db.query(WorkLocation)
+    if active_only:
+        q = q.filter(WorkLocation.is_active == True)
+    return q.order_by(WorkLocation.name).all()
+
+
+@router.post("/work-locations", response_model=WorkLocationResponse, status_code=201,
+             summary="Create a work location")
+def create_work_location(
+    payload:      WorkLocationCreate,
+    current_user: Annotated[CurrentUser, Depends(require_role(*_wl_roles))],
     db:           Annotated[Session, Depends(get_db)],
 ):
-    emp = db.query(Employee).filter(Employee.id == emp_id).first()
+    wl = WorkLocation(**payload.model_dump())
+    db.add(wl)
+    db.commit()
+    db.refresh(wl)
+    return wl
+
+
+@router.patch("/work-locations/{wl_id}", response_model=WorkLocationResponse,
+              summary="Update a work location")
+def update_work_location(
+    wl_id:        int,
+    payload:      WorkLocationUpdate,
+    current_user: Annotated[CurrentUser, Depends(require_role(*_wl_roles))],
+    db:           Annotated[Session, Depends(get_db)],
+):
+    wl = db.query(WorkLocation).filter(WorkLocation.id == wl_id).first()
+    if not wl:
+        raise HTTPException(404, "Work location not found")
+    for field, val in payload.model_dump(exclude_unset=True).items():
+        setattr(wl, field, val)
+    db.commit()
+    db.refresh(wl)
+    return wl
+
+
+@router.patch("/employees/{employee_id}/work-location",
+              response_model=dict,
+              summary="Assign or clear work location for an employee")
+def assign_employee_work_location(
+    employee_id:      int,
+    current_user:     Annotated[CurrentUser, Depends(require_role(*_wl_roles))],
+    db:               Annotated[Session, Depends(get_db)],
+    work_location_id: int | None = Query(None, description="Pass null to clear assignment"),
+):
+    emp = db.query(Employee).filter(Employee.id == employee_id).first()
     if not emp:
         raise HTTPException(404, "Employee not found")
 
-    try:
-        from app.hris_face import register_face
-        photo_bytes = await photo.read()
-        embedding   = register_face(photo_bytes)
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+    if work_location_id is not None:
+        wl = db.query(WorkLocation).filter(WorkLocation.id == work_location_id).first()
+        if not wl:
+            raise HTTPException(404, "Work location not found")
+        emp.work_location_id = wl.id
+        msg = f"Assigned to {wl.name}"
+    else:
+        emp.work_location_id = None
+        msg = "Work location cleared"
 
-    emp.face_embedding = embedding
     db.commit()
-    return MessageResponse(message=f"Face template registered for {emp.full_name} ({len(embedding)} dimensions)")
+    return {"message": msg, "employee_id": employee_id, "work_location_id": work_location_id}
 
 
 # ─── Leave Types ─────────────────────────────────────────────────────────────
@@ -494,14 +836,26 @@ def seed_leave_balances(
     leave_types = db.query(LeaveType).filter(LeaveType.is_active == True).all()
     created = 0
 
+    if not employees or not leave_types:
+        return MessageResponse(message=f"Seeded {created} leave balance rows for {year}")
+
+    emp_ids = [e.id for e in employees]
+    lt_ids  = [lt.id for lt in leave_types]
+
+    # Load all existing balances for this year in ONE query (N+1 fix)
+    existing_keys: set[tuple[int, int]] = {
+        (b.employee_id, b.leave_type_id)
+        for b in db.query(LeaveBalance).filter(
+            LeaveBalance.employee_id.in_(emp_ids),
+            LeaveBalance.leave_type_id.in_(lt_ids),
+            LeaveBalance.year == year,
+        ).all()
+    }
+
+    lt_map = {lt.id: lt for lt in leave_types}
     for emp in employees:
         for lt in leave_types:
-            existing = db.query(LeaveBalance).filter(
-                LeaveBalance.employee_id   == emp.id,
-                LeaveBalance.leave_type_id == lt.id,
-                LeaveBalance.year          == year,
-            ).first()
-            if not existing:
+            if (emp.id, lt.id) not in existing_keys:
                 db.add(LeaveBalance(
                     employee_id   = emp.id,
                     leave_type_id = lt.id,
@@ -555,13 +909,17 @@ def submit_leave_request(
     current_user: CurrentUser,
     db:           Annotated[Session, Depends(get_db)],
 ):
-    emp = db.query(Employee).filter(Employee.id == payload.employee_id).first()
-    if not emp:
-        raise HTTPException(404, "Employee not found")
-
-    # Self-service guard
-    if emp.user_id != current_user.id and current_user.role.name not in _hr_roles:
-        raise HTTPException(403, "Can only submit leave for yourself")
+    if payload.employee_id:
+        emp = db.query(Employee).filter(Employee.id == payload.employee_id).first()
+        if not emp:
+            raise HTTPException(404, "Employee not found")
+        # HR/admin can submit for others; employees can only submit for themselves
+        if emp.user_id != current_user.id and current_user.role.name not in _hr_roles:
+            raise HTTPException(403, "Can only submit leave for yourself")
+    else:
+        emp = db.query(Employee).filter(Employee.user_id == current_user.id).first()
+        if not emp:
+            raise HTTPException(404, "No employee record linked to your account")
 
     lt = db.query(LeaveType).filter(
         LeaveType.id == payload.leave_type_id, LeaveType.is_active == True
@@ -569,8 +927,13 @@ def submit_leave_request(
     if not lt:
         raise HTTPException(404, "Leave type not found or inactive")
 
-    # Calculate business days (simple: calendar days including weekends for now)
-    delta = (payload.end_date - payload.start_date).days + 1
+    # Calculate business days — exclude Saturdays (5) and Sundays (6)
+    delta = sum(
+        1 for i in range((payload.end_date - payload.start_date).days + 1)
+        if (payload.start_date + timedelta(days=i)).weekday() < 5
+    )
+    if delta == 0:
+        raise HTTPException(422, "Leave dates must include at least one working day (Mon–Fri)")
 
     # Check balance
     year = payload.start_date.year
@@ -612,7 +975,7 @@ def submit_leave_request(
 
     # If auto-approved (no approval required), deduct balance
     if req.status == LeaveRequestStatus.APPROVED:
-        _deduct_balance(db, emp.id, lt.id, year, delta)
+        _deduct_balance(db, emp.id, lt, year, delta)
 
     write_audit(db, "LeaveRequest", req.id, "SUBMIT",
                 changed_by=current_user.id, ip_address=get_client_ip(request),
@@ -663,7 +1026,7 @@ def approve_leave_request(
         req.approved_by           = current_user.id
         req.approval_step         = step
         # Deduct balance
-        _deduct_balance(db, req.employee_id, req.leave_type_id, req.start_date.year, req.days)
+        _deduct_balance(db, req.employee_id, req.leave_type, req.start_date.year, req.days)
         # Notify employee
         if req.employee and req.employee.user_id:
             push(db, req.employee.user_id,
@@ -736,11 +1099,208 @@ def _add_leave_history(req: LeaveRequest, actor_id: int, action: str, note: str 
     req.approval_history = history
 
 
-def _deduct_balance(db: Session, employee_id: int, leave_type_id: int, year: int, days: int):
+def _deduct_balance(db: Session, employee_id: int, leave_type: LeaveType, year: int, days: int):
+    """
+    Deduct leave balance for the given leave type.
+    Maternity and paternity leave are separate statutory entitlements — no balance deduction.
+    """
+    _no_deduct_categories = (LeaveCategory.MATERNITY, LeaveCategory.PATERNITY)
+    if leave_type.category in _no_deduct_categories:
+        return
+
     balance = db.query(LeaveBalance).filter(
         LeaveBalance.employee_id   == employee_id,
-        LeaveBalance.leave_type_id == leave_type_id,
+        LeaveBalance.leave_type_id == leave_type.id,
         LeaveBalance.year          == year,
     ).first()
     if balance:
         balance.used = min(balance.accrued, balance.used + days)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Overtime Requests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_my_employee_att(db: Session, cu) -> Employee:
+    emp = db.query(Employee).filter(Employee.user_id == cu.id).first()
+    if not emp:
+        raise HTTPException(404, "No employee profile linked to your account")
+    return emp
+
+
+@router.post("/overtime-requests", response_model=OvertimeRequestResponse, status_code=201,
+             summary="Submit overtime request")
+def submit_overtime_request(
+    payload: OvertimeRequestCreate,
+    cu: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+):
+    emp = _get_my_employee_att(db, cu)
+    ot = OvertimeRequest(
+        employee_id=emp.id,
+        date=payload.date,
+        planned_hours=payload.planned_hours,
+        reason=payload.reason,
+        status=OvertimeRequestStatus.SUBMITTED,
+    )
+    db.add(ot)
+    db.commit()
+    db.refresh(ot)
+    # Notify HR
+    push_to_role(db, RoleName.GA,
+                 "Pengajuan Lembur Baru",
+                 f"{emp.full_name} mengajukan lembur {payload.planned_hours}j pada {payload.date}",
+                 "/hris/attendance")
+    resp = OvertimeRequestResponse.model_validate(ot)
+    resp.employee_name = emp.full_name
+    return resp
+
+
+@router.get("/me/overtime-requests", response_model=list[OvertimeRequestResponse],
+            summary="My overtime requests")
+def my_overtime_requests(
+    cu: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+):
+    emp = _get_my_employee_att(db, cu)
+    rows = (
+        db.query(OvertimeRequest)
+        .filter(OvertimeRequest.employee_id == emp.id)
+        .order_by(OvertimeRequest.date.desc())
+        .all()
+    )
+    result = []
+    for r in rows:
+        resp = OvertimeRequestResponse.model_validate(r)
+        resp.employee_name = emp.full_name
+        result.append(resp)
+    return result
+
+
+@router.get("/overtime-requests", response_model=list[OvertimeRequestResponse],
+            summary="List all overtime requests (HR/MD)")
+def list_overtime_requests(
+    cu: Annotated[CurrentUser, Depends(require_role(*_hr_roles))],
+    db: Annotated[Session, Depends(get_db)],
+    status_filter: str | None = Query(None, alias="status"),
+    date_from: date | None = Query(None),
+    date_to:   date | None = Query(None),
+):
+    q = db.query(OvertimeRequest)
+    if status_filter:
+        q = q.filter(OvertimeRequest.status == status_filter)
+    if date_from:
+        q = q.filter(OvertimeRequest.date >= date_from)
+    if date_to:
+        q = q.filter(OvertimeRequest.date <= date_to)
+    rows = q.order_by(OvertimeRequest.date.desc()).all()
+    result = []
+    for r in rows:
+        resp = OvertimeRequestResponse.model_validate(r)
+        resp.employee_name = r.employee.full_name if r.employee else None
+        result.append(resp)
+    return result
+
+
+@router.post("/overtime-requests/{ot_id}/approve", response_model=OvertimeRequestResponse)
+def approve_overtime_request(
+    ot_id: int,
+    payload: OvertimeActionRequest,
+    cu: Annotated[CurrentUser, Depends(require_role(*_hr_roles))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    ot = db.query(OvertimeRequest).filter(OvertimeRequest.id == ot_id).first()
+    if not ot:
+        raise HTTPException(404, "Overtime request not found")
+    if ot.status != OvertimeRequestStatus.SUBMITTED:
+        raise HTTPException(400, f"Request already {ot.status.value}")
+    ot.status = OvertimeRequestStatus.APPROVED
+    ot.approved_by = cu.id
+    ot.approved_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(ot)
+    push(db, ot.employee.user_id, "Lembur Disetujui",
+         f"Pengajuan lembur Anda pada {ot.date} telah disetujui.",
+         "/hris/me/overtime") if ot.employee and ot.employee.user_id else None
+    resp = OvertimeRequestResponse.model_validate(ot)
+    resp.employee_name = ot.employee.full_name if ot.employee else None
+    return resp
+
+
+@router.post("/overtime-requests/{ot_id}/reject", response_model=OvertimeRequestResponse)
+def reject_overtime_request(
+    ot_id: int,
+    payload: OvertimeActionRequest,
+    cu: Annotated[CurrentUser, Depends(require_role(*_hr_roles))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    ot = db.query(OvertimeRequest).filter(OvertimeRequest.id == ot_id).first()
+    if not ot:
+        raise HTTPException(404, "Overtime request not found")
+    if ot.status != OvertimeRequestStatus.SUBMITTED:
+        raise HTTPException(400, f"Request already {ot.status.value}")
+    ot.status = OvertimeRequestStatus.REJECTED
+    ot.approved_by = cu.id
+    ot.approved_at = datetime.now(timezone.utc)
+    ot.rejection_reason = payload.note
+    db.commit()
+    db.refresh(ot)
+    push(db, ot.employee.user_id, "Lembur Ditolak",
+         f"Pengajuan lembur Anda pada {ot.date} ditolak. {payload.note or ''}",
+         "/hris/me/overtime") if ot.employee and ot.employee.user_id else None
+    resp = OvertimeRequestResponse.model_validate(ot)
+    resp.employee_name = ot.employee.full_name if ot.employee else None
+    return resp
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Team Leave Calendar
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/leave-requests/calendar", response_model=list[LeaveCalendarItem],
+            summary="Team leave calendar for a given month")
+def leave_calendar(
+    cu: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+    year:    int = Query(default=None),
+    month:   int = Query(default=None),
+    dept_id: int | None = Query(None),
+):
+    today = date.today()
+    year  = year  or today.year
+    month = month or today.month
+
+    month_start = date(year, month, 1)
+    # Last day of month
+    if month == 12:
+        month_end = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        month_end = date(year, month + 1, 1) - timedelta(days=1)
+
+    q = (
+        db.query(LeaveRequest)
+        .join(Employee, LeaveRequest.employee_id == Employee.id)
+        .filter(
+            LeaveRequest.status == LeaveRequestStatus.APPROVED,
+            LeaveRequest.end_date >= month_start,
+            LeaveRequest.start_date <= month_end,
+        )
+    )
+    if dept_id:
+        q = q.filter(Employee.dept_id == dept_id)
+
+    rows = q.all()
+    result = []
+    for r in rows:
+        result.append(LeaveCalendarItem(
+            employee_id=r.employee_id,
+            employee_name=r.employee.full_name if r.employee else "Unknown",
+            dept=r.employee.department.name if r.employee and r.employee.department else None,
+            leave_type=r.leave_type.name if r.leave_type else "—",
+            start_date=r.start_date,
+            end_date=r.end_date,
+            days=r.days,
+            status=r.status.value,
+        ))
+    result.sort(key=lambda x: x.start_date)
+    return result

@@ -36,7 +36,7 @@ _ALLOWED_TYPES = {
     "image/heic", "image/heif", "application/pdf",
 }
 _MAX_SIZE = 10 * 1024 * 1024  # 10 MB
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.audit import model_to_dict, write_audit
 from app.database import get_db
@@ -44,7 +44,7 @@ from app.dependencies import (
     CurrentUser, get_client_ip, get_required_approvers_from_matrix, require_role,
 )
 from app.models import (
-    CostCentre, CostCode, Expense, ExpenseStatus, Project, RoleName,
+    CostCentre, CostCode, Expense, ExpenseStatus, ExpenseType, Project, RoleName,
 )
 from app.notify import push, push_to_role
 from app.schemas import (
@@ -88,12 +88,19 @@ def list_expenses(
     limit:          int = Query(100, ge=1, le=500),
 ):
     q = db.query(Expense)
-    if project_id:
-        q = q.filter(Expense.project_id == project_id)
+
+    # STAFF and WORKER can only see their own submissions (confidentiality)
+    self_service_roles = {RoleName.STAFF, RoleName.WORKER}
+    if current_user.role.name in self_service_roles:
+        q = q.filter(Expense.submitted_by == current_user.id)
+    else:
+        if project_id:
+            q = q.filter(Expense.project_id == project_id)
+        if my_queue:
+            q = q.filter(Expense.current_approver_role == current_user.role.name.value)
+
     if expense_status:
         q = q.filter(Expense.status == expense_status)
-    if my_queue:
-        q = q.filter(Expense.current_approver_role == current_user.role.name.value)
     if search:
         q = q.filter(or_(
             Expense.description.ilike(f"%{search}%"),
@@ -178,7 +185,10 @@ def export_expenses(
     date_to:        str | None = Query(None),
 ):
     q = db.query(Expense)
-    if project_id:
+    self_service_roles = {RoleName.STAFF, RoleName.WORKER}
+    if current_user.role.name in self_service_roles:
+        q = q.filter(Expense.submitted_by == current_user.id)
+    elif project_id:
         q = q.filter(Expense.project_id == project_id)
     if status:
         try:
@@ -196,7 +206,15 @@ def export_expenses(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date_to format, use ISO 8601")
 
-    expenses = q.order_by(Expense.id.desc()).all()
+    expenses = (
+        q.options(
+            joinedload(Expense.project),
+            joinedload(Expense.cost_code),
+            joinedload(Expense.submitter),
+        )
+        .order_by(Expense.id.desc())
+        .all()
+    )
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -264,7 +282,11 @@ def get_expense(
     current_user: CurrentUser,
     db:           Annotated[Session, Depends(get_db)],
 ):
-    return _get_or_404(expense_id, db)
+    expense = _get_or_404(expense_id, db)
+    self_service_roles = {RoleName.STAFF, RoleName.WORKER}
+    if current_user.role.name in self_service_roles and expense.submitted_by != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your expense")
+    return expense
 
 
 # ─── Create (draft) ──────────────────────────────────────────────────────────
@@ -277,8 +299,30 @@ def create_expense(
     current_user: CurrentUser,
     db:           Annotated[Session, Depends(get_db)],
 ):
-    if not db.query(Project).filter(Project.id == payload.project_id).first():
-        raise HTTPException(status_code=404, detail="Project not found")
+    # STAFF / WORKER can only create reimbursements
+    if current_user.role.name in (RoleName.STAFF, RoleName.WORKER):
+        if payload.expense_type != ExpenseType.REIMBURSEMENT:
+            raise HTTPException(403, "Staff and Workers can only submit reimbursements")
+
+    # Auto-assign reimbursement cost code for STAFF/WORKER (code 99.10)
+    # They don't pick a cost code in the UI — it's always "Personal Reimbursement"
+    if payload.expense_type == ExpenseType.REIMBURSEMENT and current_user.role.name in (RoleName.STAFF, RoleName.WORKER):
+        reimb_code = (
+            db.query(CostCode)
+            .filter(CostCode.code == "99.10", CostCode.is_active == True)
+            .first()
+        )
+        if not reimb_code:
+            raise HTTPException(500, "Reimbursement cost code (99.10) not found — run seed script")
+        payload.cost_code_id = reimb_code.id
+
+    # Project is required for regular expenses, optional for reimbursements
+    if payload.project_id is not None:
+        if not db.query(Project).filter(Project.id == payload.project_id).first():
+            raise HTTPException(status_code=404, detail="Project not found")
+    elif payload.expense_type == ExpenseType.REGULAR:
+        raise HTTPException(status_code=422, detail="project_id is required for regular expenses")
+
     if not db.query(CostCode).filter(CostCode.id == payload.cost_code_id, CostCode.is_active == True).first():
         raise HTTPException(status_code=404, detail="Cost code not found or inactive")
     if payload.cost_centre_id and not db.query(CostCentre).filter(
@@ -287,6 +331,7 @@ def create_expense(
         raise HTTPException(status_code=404, detail="Cost centre not found or inactive")
 
     expense = Expense(
+        expense_type     = payload.expense_type,
         project_id       = payload.project_id,
         cost_code_id     = payload.cost_code_id,
         cost_centre_id   = payload.cost_centre_id,
@@ -371,18 +416,26 @@ def submit_expense(
 ):
     expense = _get_or_404(expense_id, db)
 
+    if expense.submitted_by != current_user.id and current_user.role.name not in (
+        RoleName.SUPER_ADMIN, RoleName.COST_CONTROL
+    ):
+        raise HTTPException(status_code=403, detail="Not your expense")
+
     allowed_from = {ExpenseStatus.DRAFT, ExpenseStatus.REJECTED}
     if expense.status not in allowed_from:
         raise HTTPException(status_code=409,
                             detail=f"Cannot submit from status '{expense.status}'")
 
-    # Build approval chain from matrix
-    cost_code = db.query(CostCode).filter(CostCode.id == expense.cost_code_id).first()
-    chain = get_required_approvers_from_matrix(db, expense.amount, cost_code.category)
-
-    # COST_CONTROL always verifies first; add to front if not already present
-    if RoleName.COST_CONTROL.value not in chain:
-        chain.insert(0, RoleName.COST_CONTROL.value)
+    # Build approval chain
+    if expense.expense_type == ExpenseType.REIMBURSEMENT:
+        # Fixed reimbursement chain: GA receipt check → CC verify → Finance approve+pay
+        chain = [RoleName.GA.value, RoleName.COST_CONTROL.value, RoleName.FINANCE.value]
+    else:
+        # Regular expense: chain from approval matrix, CC always first
+        cost_code = db.query(CostCode).filter(CostCode.id == expense.cost_code_id).first()
+        chain = get_required_approvers_from_matrix(db, expense.amount, cost_code.category)
+        if RoleName.COST_CONTROL.value not in chain:
+            chain.insert(0, RoleName.COST_CONTROL.value)
 
     before = model_to_dict(expense)
     expense.status               = ExpenseStatus.SUBMITTED
@@ -398,10 +451,12 @@ def submit_expense(
                 changed_by=current_user.id, ip_address=get_client_ip(request),
                 before=before, after=model_to_dict(expense))
     submitter_name = expense.submitter.full_name if expense.submitter else str(expense.submitted_by)
+    notify_role = RoleName.GA if expense.expense_type == ExpenseType.REIMBURSEMENT else RoleName.COST_CONTROL
     push_to_role(
-        db, RoleName.COST_CONTROL,
-        "Pengeluaran Baru",
-        f"Pengeluaran #{expense.id} dari {submitter_name} menunggu verifikasi",
+        db, notify_role,
+        "Reimbursement Baru" if expense.expense_type == ExpenseType.REIMBURSEMENT else "Pengeluaran Baru",
+        f"{'Reimbursement' if expense.expense_type == ExpenseType.REIMBURSEMENT else 'Pengeluaran'} "
+        f"#{expense.id} dari {submitter_name} menunggu {'verifikasi bukti' if expense.expense_type == ExpenseType.REIMBURSEMENT else 'verifikasi'}",
         link="/spending",
     )
     db.commit()
@@ -412,44 +467,73 @@ def submit_expense(
 # ─── Verify (COST_CONTROL) ───────────────────────────────────────────────────
 
 @router.post("/{expense_id}/verify", response_model=ExpenseResponse,
-             summary="Cost-control verification")
+             summary="Verification step — GA (receipt check) or Cost Control")
 def verify_expense(
     expense_id:   int,
     request:      Request,
     payload:      ExpenseActionRequest,
-    current_user: Annotated[object, Depends(require_role(
-        RoleName.COST_CONTROL, RoleName.SUPER_ADMIN
-    ))],
-    db: Annotated[Session, Depends(get_db)],
+    current_user: CurrentUser,
+    db:           Annotated[Session, Depends(get_db)],
 ):
+    """
+    Handles the 'verify' action for both GA (receipt check, step 0 of reimbursement chain)
+    and Cost Control (cost verification, all regular + step 1 of reimbursement chain).
+    Caller's role must match `current_approver_role`.
+    """
     expense = _get_or_404(expense_id, db)
 
     if expense.status != ExpenseStatus.SUBMITTED:
         raise HTTPException(status_code=409,
                             detail="Expense must be in 'submitted' status to verify")
 
-    chain = expense.approval_chain or []
-    if chain and chain[0] != RoleName.COST_CONTROL.value:
-        raise HTTPException(status_code=409,
-                            detail="First approver in chain is not COST_CONTROL")
+    expected_role = expense.current_approver_role
+    caller_role   = current_user.role.name.value
+
+    # Only the expected role (or SUPER_ADMIN) may act
+    if caller_role != expected_role and current_user.role.name != RoleName.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This expense is waiting for {expected_role} to verify",
+        )
+    # Additional guard: only GA/CC/SA may call verify at all
+    allowed_verify_roles = {RoleName.GA, RoleName.COST_CONTROL, RoleName.SUPER_ADMIN}
+    if current_user.role.name not in allowed_verify_roles:
+        raise HTTPException(403, "Only GA or Cost Control can perform verification")
 
     before = model_to_dict(expense)
-    expense.verified_by = current_user.id
-    _add_history_event(expense, current_user.id, "VERIFY", payload.note)
 
-    # Advance the chain
+    # Record who did what
+    if current_user.role.name == RoleName.GA:
+        expense.receipt_reviewed_by = current_user.id
+        action_label = "RECEIPT_REVIEW"
+        notif_msg    = f"Bukti reimburse #{expense.id} telah diverifikasi oleh GA"
+    else:
+        expense.verified_by = current_user.id
+        action_label = "VERIFY"
+        notif_msg    = f"Pengeluaran #{expense.id} telah diverifikasi oleh Cost Control"
+
+    _add_history_event(expense, current_user.id, action_label, payload.note)
     _advance_chain(expense)
 
-    write_audit(db, "Expense", expense.id, "VERIFY",
+    write_audit(db, "Expense", expense.id, action_label,
                 changed_by=current_user.id, ip_address=get_client_ip(request),
                 before=before, after=model_to_dict(expense))
     if expense.submitted_by:
-        push(
-            db, expense.submitted_by,
-            "Pengeluaran Diverifikasi",
-            f"Pengeluaran #{expense.id} telah diverifikasi oleh Cost Control",
-            link="/spending",
-        )
+        push(db, expense.submitted_by,
+             "Reimburse Diproses" if expense.expense_type == ExpenseType.REIMBURSEMENT else "Pengeluaran Diverifikasi",
+             notif_msg, link="/spending")
+
+    # Notify next approver in chain
+    if expense.current_approver_role:
+        try:
+            next_role = RoleName(expense.current_approver_role)
+            push_to_role(db, next_role,
+                         "Menunggu Verifikasi Anda",
+                         f"Pengeluaran #{expense.id} perlu ditindaklanjuti",
+                         link="/spending")
+        except ValueError:
+            pass
+
     db.commit()
     db.refresh(expense)
     return expense
@@ -485,9 +569,13 @@ def approve_expense(
 
     _advance_chain(expense)
 
+    # Budget check only applies when expense is linked to a project
+    over_budget      = None
+    budget_remaining = None
     project = expense.project
-    over_budget     = (project.total_committed + expense.amount) > project.total_revenue
-    budget_remaining = project.total_revenue - project.total_committed - expense.amount
+    if project is not None:
+        over_budget      = (project.total_committed + expense.amount) > project.total_revenue
+        budget_remaining = project.total_revenue - project.total_committed - expense.amount
 
     write_audit(db, "Expense", expense.id, "APPROVE",
                 changed_by=current_user.id, ip_address=get_client_ip(request),

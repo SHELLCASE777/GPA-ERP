@@ -12,6 +12,7 @@ build/
 venv/
 env/
 .venv/
+.venv*/
 .env
 *.env
 
@@ -48,6 +49,8 @@ docs/deck_slides/
 # Generated/actual project documents (PDFs, PPTX, images)
 docs/*.pdf
 docs/*.pptx
+docs/*.xlsx
+docs/*.docx
 app/templates/*.pdf
 app/templates/*.png
 app/templates/*.jpg

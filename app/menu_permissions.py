@@ -23,41 +23,56 @@ DEFAULT_MENUS = [
     ("settings", "Settings", "Vault", "/settings", "Users, roles, branding, configuration", 90),
     ("vault", "Vault", "Vault", "/vault", "Approval matrix, cost codes, cost centres, audit log", 100),
     ("backend_admin", "Backend Admin", "System", "/admin", "Backend maintenance console", 110),
-    # HRIS modules
+    # HRIS modules — admin/HR views
     ("hris_dashboard",   "HRIS Dashboard",    "HRIS", "/hris",             "Headcount KPIs, employment mix, org overview", 200),
     ("hris_employees",   "Data Karyawan",     "HRIS", "/hris/employees",   "Employee master, departments, job grades",    210),
     ("hris_attendance",  "Absensi & Lembur",  "HRIS", "/hris/attendance",  "Daily attendance, geolocation clock-in, overtime", 220),
     ("hris_leave",       "Cuti & Izin",       "HRIS", "/hris/leave",       "Leave requests, balances, approval flow",     230),
     ("hris_payroll",     "Penggajian",        "HRIS", "/hris/payroll",     "Payroll run, BPJS, PPh21, slip gaji",        240),
     ("hris_recruitment", "Rekrutmen",         "HRIS", "/hris/recruitment", "Job postings, applicant pipeline, onboarding", 250),
+    ("hris_settings",    "Pengaturan HRIS",   "HRIS", "/hris/settings",    "Work locations, leave types, holiday calendar, salary components", 260),
+    # HRIS self-service — worker/employee portal
+    ("hris_my_payslip",  "Slip Gaji Saya",    "Self Service", "/hris/me/payslip", "View own monthly payslips", 245),
 ]
 OBSOLETE_MENU_KEYS = {"expenses", "procurement"}
 
 ROLE_PRESETS: dict[str, set[str]] = {
     "SUPER_ADMIN": {key for key, *_ in DEFAULT_MENUS},
     "MD": {
-        "dashboard", "action_center", "project_command", "revenue_ar", "spending", "inventory", "legal", "reports",
-        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave", "hris_payroll", "hris_recruitment",
+        "dashboard", "action_center", "project_command", "revenue_ar", "spending",
+        "inventory", "legal", "reports",
+        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave",
+        "hris_payroll", "hris_recruitment", "hris_my_payslip",
     },
     "PM": {
-        "dashboard", "action_center", "project_command", "spending", "inventory", "legal", "reports",
-        "hris_dashboard", "hris_attendance", "hris_leave",
+        "dashboard", "action_center", "project_command", "spending",
+        "inventory", "legal", "reports",
+        "hris_dashboard", "hris_attendance", "hris_leave", "hris_my_payslip",
     },
     "COST_CONTROL": {
-        "dashboard", "action_center", "project_command", "spending", "petty_cash", "inventory", "reports",
-        "hris_dashboard",
+        "dashboard", "action_center", "project_command", "spending", "petty_cash",
+        "inventory", "reports",
+        "hris_dashboard", "hris_my_payslip",
     },
     "FINANCE": {
-        "dashboard", "action_center", "project_command", "revenue_ar", "spending", "petty_cash", "reports",
-        "hris_dashboard", "hris_payroll",
+        "dashboard", "action_center", "project_command", "revenue_ar", "spending",
+        "petty_cash", "reports",
+        "hris_dashboard", "hris_payroll", "hris_my_payslip",
     },
     "GA": {
         "dashboard", "action_center", "spending", "petty_cash", "inventory",
-        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave", "hris_recruitment",
+        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave",
+        "hris_recruitment", "hris_settings", "hris_my_payslip",
     },
+    # Office staff: expense reimbursements only + HRIS self-service portal
+    # No ERP dashboard/action_center — frontend routes them to /hris/me
     "STAFF": {
-        "dashboard", "action_center", "spending",
-        "hris_attendance", "hris_leave",
+        "spending",
+        "hris_attendance", "hris_leave", "hris_my_payslip",
+    },
+    # Site/field worker: HRIS self-service only — no ERP access
+    "WORKER": {
+        "hris_attendance", "hris_leave", "hris_my_payslip",
     },
 }
 

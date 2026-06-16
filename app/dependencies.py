@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import or_
@@ -40,7 +40,10 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ─── JWT ─────────────────────────────────────────────────────────────────────
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+# Kept for OpenAPI /docs "Authorize" button compatibility
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+# Optional Bearer extractor (does not auto-raise 401)
+_http_bearer = HTTPBearer(auto_error=False)
 
 
 def create_access_token(data: dict) -> tuple[str, int]:
@@ -55,15 +58,36 @@ def create_access_token(data: dict) -> tuple[str, int]:
 
 # ─── Current user ────────────────────────────────────────────────────────────
 
-def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
-    db:    Annotated[Session, Depends(get_db)],
+async def get_current_user(
+    request:     Request,
+    db:          Annotated[Session, Depends(get_db)],
+    bearer:      Annotated[HTTPAuthorizationCredentials | None, Depends(_http_bearer)] = None,
 ) -> User:
+    """
+    Resolves the current user from two token sources (in priority order):
+    1. httpOnly cookie ``access_token`` — set by POST /api/auth/login for browser clients.
+    2. ``Authorization: Bearer <token>`` header — for API / mobile clients.
+    """
     credentials_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    # 1. Try cookie first
+    token: str | None = request.cookies.get("access_token")
+
+    # 2. Fall back to Authorization: Bearer header
+    if not token and bearer is not None:
+        token = bearer.credentials
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_id: str | None = payload.get("sub")

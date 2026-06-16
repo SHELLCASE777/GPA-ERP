@@ -66,34 +66,40 @@ def _annual_tax(pkp: Decimal) -> Decimal:
 
 
 def calculate_pph21_netto(
-    gross_monthly: Decimal,
-    ptkp_status:   str = DEFAULT_PTKP,
+    gross_monthly:     Decimal,
+    ptkp_status:       str = DEFAULT_PTKP,
+    months_remaining:  int = 12,
 ) -> Decimal:
     """
     Calculate monthly PPh 21 (NETTO method — borne by employee).
 
     Formula:
-        Annual gross = gross_monthly × 12
-        Biaya jabatan = min(annual_gross × 5%, 6_000_000)
-        PKP = Annual gross − biaya_jabatan − PTKP
-        Annual tax = progressive(PKP)
-        Monthly tax = annual_tax / 12
+        Annual gross   = gross_monthly × months_remaining
+        Biaya jabatan  = min(annual_gross × 5%, 6_000_000)
+        PKP            = Annual gross − biaya_jabatan − PTKP
+        Annual tax     = progressive(PKP)
+        Monthly tax    = annual_tax / months_remaining
+
+    `months_remaining` handles mid-year joiners (e.g., employee who joins in
+    October should use 3, not 12, to avoid over-projecting taxable income).
 
     Returns monthly PPh 21 amount (Rp, rounded to nearest rupiah).
     """
+    months = max(1, min(12, months_remaining))
     ptkp_amount = Decimal(PTKP.get(ptkp_status, PTKP[DEFAULT_PTKP]))
 
-    annual_gross    = gross_monthly * 12
+    annual_gross    = gross_monthly * months
     biaya_jabatan   = min(annual_gross * Decimal("0.05"), Decimal("6_000_000"))
     pkp             = annual_gross - biaya_jabatan - ptkp_amount
     annual_tax      = _annual_tax(pkp)
-    monthly_tax     = (annual_tax / 12).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    monthly_tax     = (annual_tax / months).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return monthly_tax
 
 
 def calculate_pph21_gross_up(
-    gross_monthly: Decimal,
-    ptkp_status:   str = DEFAULT_PTKP,
+    gross_monthly:    Decimal,
+    ptkp_status:      str = DEFAULT_PTKP,
+    months_remaining: int = 12,
 ) -> tuple[Decimal, Decimal]:
     """
     Calculate PPh 21 gross-up (employer bears the tax).
@@ -107,7 +113,7 @@ def calculate_pph21_gross_up(
     # Iterative convergence (typically < 10 iterations)
     T = Decimal(0)
     for _ in range(50):
-        pph21 = calculate_pph21_netto(gross_monthly + T, ptkp_status)
+        pph21 = calculate_pph21_netto(gross_monthly + T, ptkp_status, months_remaining)
         if abs(pph21 - T) < 1:
             T = pph21
             break

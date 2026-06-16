@@ -551,3 +551,190 @@ def generate_document_pdf(
     writer.write(out)
     out.seek(0)
     return out.read()
+
+
+# ── Pay Slip PDF ──────────────────────────────────────────────────────────────
+
+def generate_payslip(
+    period_label:      str,
+    employee_no:       str,
+    employee_name:     str,
+    department:        str | None,
+    bank_name:         str | None,
+    bank_account:      str | None,
+    gross_salary:      Decimal,
+    bpjs_tk_employee:  Decimal,
+    bpjs_kes_employee: Decimal,
+    bpjs_tk_employer:  Decimal,
+    bpjs_kes_employer: Decimal,
+    pph21_amount:      Decimal,
+    pph21_method:      str,
+    tunjangan_pajak:   Decimal,
+    thr_amount:        Decimal | None,
+    net_salary:        Decimal,
+    generated_at:      datetime,
+    components_snapshot: dict | None = None,
+) -> bytes:
+    """
+    Generates a clean pay-slip PDF overlaid on the KOP SURAT letterhead.
+    Returns PDF bytes.
+    """
+    buf = io.BytesIO()
+    c   = rl_canvas.Canvas(buf, pagesize=A4)
+
+    y = CONTENT_TOP
+
+    def ln(pts: float = 0.0):
+        nonlocal y
+        y -= pts
+
+    def rp(amount: Decimal) -> str:
+        return f"Rp {float(amount):,.0f}".replace(",", ".")
+
+    def draw_line_item(label: str, value: Decimal, bold: bool = False,
+                       color: tuple = (0.1, 0.1, 0.1), bg: tuple | None = None):
+        nonlocal y
+        row_h = 17
+        if bg:
+            c.saveState()
+            c.setFillColorRGB(*bg)
+            c.rect(MARGIN_L, y - 2, CONTENT_W, row_h, fill=1, stroke=0)
+            c.restoreState()
+        c.setFont(FONT_B if bold else FONT_R, 9.5)
+        c.setFillColorRGB(*color)
+        c.drawString(MARGIN_L + 6, y + 3, label)
+        c.drawRightString(MARGIN_R - 6, y + 3, rp(value))
+        c.setFillColorRGB(0, 0, 0)
+        ln(row_h)
+
+    def section_header(title: str):
+        nonlocal y
+        c.setFillColorRGB(0.10, 0.16, 0.28)
+        c.rect(MARGIN_L, y - 1, CONTENT_W, 19, fill=1, stroke=0)
+        c.setFont(FONT_B, 9.5)
+        c.setFillColorRGB(1, 1, 1)
+        c.drawString(MARGIN_L + 6, y + 4, title.upper())
+        c.setFillColorRGB(0, 0, 0)
+        ln(22)
+
+    # ── Title ─────────────────────────────────────────────────────────
+    ln(4)
+    c.setFont(FONT_B, 14)
+    c.setFillColorRGB(0.10, 0.16, 0.28)
+    c.drawString(MARGIN_L, y, f"SLIP GAJI — {period_label.upper()}")
+    ln(16)
+    c.setFont(FONT_I, 8.5)
+    c.setFillColorRGB(0.55, 0.55, 0.55)
+    c.drawString(MARGIN_L, y, "RAHASIA — Dokumen ini hanya untuk karyawan yang bersangkutan")
+    c.setFillColorRGB(0, 0, 0)
+    ln(20)
+
+    c.setStrokeColorRGB(0.85, 0.85, 0.85)
+    c.setLineWidth(0.5)
+    c.line(MARGIN_L, y, MARGIN_R, y)
+    ln(14)
+
+    # ── Employee info table ────────────────────────────────────────────
+    right_x  = MARGIN_L + CONTENT_W * 0.5 + 4
+    label_w  = 80
+
+    def info_row(lbl1: str, val1: str, lbl2: str = "", val2: str = ""):
+        nonlocal y
+        c.setFont(FONT_R, 8.5)
+        c.setFillColorRGB(0.50, 0.50, 0.50)
+        c.drawString(MARGIN_L, y, lbl1)
+        c.setFont(FONT_B, 9)
+        c.setFillColorRGB(0.10, 0.10, 0.10)
+        c.drawString(MARGIN_L + label_w, y, f": {val1}")
+        if lbl2:
+            c.setFont(FONT_R, 8.5)
+            c.setFillColorRGB(0.50, 0.50, 0.50)
+            c.drawString(right_x, y, lbl2)
+            c.setFont(FONT_B, 9)
+            c.setFillColorRGB(0.10, 0.10, 0.10)
+            c.drawString(right_x + label_w, y, f": {val2 or chr(8212)}")
+        c.setFillColorRGB(0, 0, 0)
+        ln(14)
+
+    info_row("No. Karyawan", employee_no,              "Departemen",    department or chr(8212))
+    info_row("Nama",         employee_name,             "Metode PPh 21", pph21_method)
+    info_row("Bank",         bank_name or chr(8212),    "No. Rekening",  bank_account or chr(8212))
+    info_row("Tanggal Cetak", generated_at.strftime("%d %B %Y"))
+    ln(10)
+
+    # ── Pendapatan ────────────────────────────────────────────────────
+    section_header("Pendapatan")
+    draw_line_item("Gaji Kotor (Gross)", gross_salary)
+    if tunjangan_pajak > 0:
+        draw_line_item("Tunjangan Pajak (Gross-Up)", tunjangan_pajak)
+    if thr_amount is not None and thr_amount > 0:
+        draw_line_item("Tunjangan Hari Raya (THR)", thr_amount)
+    total_earn = gross_salary + tunjangan_pajak + (thr_amount or Decimal(0))
+    draw_line_item("TOTAL PENDAPATAN", total_earn, bold=True, bg=(0.96, 0.98, 1.0))
+    ln(8)
+
+    # ── Potongan ──────────────────────────────────────────────────────
+    section_header("Potongan")
+    draw_line_item("BPJS Ketenagakerjaan (Karyawan)", bpjs_tk_employee)
+    draw_line_item("BPJS Kesehatan (Karyawan)",       bpjs_kes_employee)
+    draw_line_item(f"PPh 21 ({pph21_method})",        pph21_amount)
+    total_deduct = bpjs_tk_employee + bpjs_kes_employee + pph21_amount
+    draw_line_item("TOTAL POTONGAN", total_deduct, bold=True, bg=(1.0, 0.97, 0.95))
+    ln(8)
+
+    # ── Net salary highlight ───────────────────────────────────────────
+    net_h = 30
+    c.setFillColorRGB(0.02, 0.52, 0.48)
+    c.roundRect(MARGIN_L, y - 4, CONTENT_W, net_h, 4, fill=1, stroke=0)
+    c.setFont(FONT_B, 10.5)
+    c.setFillColorRGB(1, 1, 1)
+    c.drawString(MARGIN_L + 10, y + 8, "GAJI BERSIH (NET)")
+    c.drawRightString(MARGIN_R - 10, y + 8, rp(net_salary))
+    c.setFillColorRGB(0, 0, 0)
+    ln(net_h + 14)
+
+    # ── Employer contributions (informational) ─────────────────────────
+    c.setFont(FONT_B, 8.5)
+    c.setFillColorRGB(0.45, 0.45, 0.45)
+    c.drawString(MARGIN_L, y, "KONTRIBUSI PERUSAHAAN (tidak mempengaruhi gaji bersih):")
+    ln(13)
+    c.setFont(FONT_R, 8.5)
+    c.drawString(MARGIN_L + 6, y, f"BPJS TK: {rp(bpjs_tk_employer)}")
+    c.drawString(MARGIN_L + CONTENT_W * 0.40, y, f"BPJS Kesehatan: {rp(bpjs_kes_employer)}")
+    c.setFillColorRGB(0, 0, 0)
+    ln(22)
+
+    # ── Footer rule + disclaimer ───────────────────────────────────────
+    c.setStrokeColorRGB(0.85, 0.85, 0.85)
+    c.line(MARGIN_L, y, MARGIN_R, y)
+    ln(10)
+    disc_style = ParagraphStyle(
+        "disc", fontName=FONT_I, fontSize=7.5, leading=11,
+        textColor=colors.Color(0.65, 0.65, 0.65),
+    )
+    _draw_para(
+        c,
+        "Slip gaji ini digenerate secara otomatis oleh GPA Cost Control ERP. "
+        "Apabila terdapat perbedaan, harap hubungi tim HR/Finance.",
+        disc_style, MARGIN_L, y, CONTENT_W,
+    )
+    c.setFillColorRGB(0, 0, 0)
+
+    c.save()
+    buf.seek(0)
+    content_bytes = buf.read()
+
+    # ── Merge onto KOP SURAT background ──────────────────────────────
+    tmpl    = PdfReader(str(TEMPLATE_PATH))
+    content = PdfReader(io.BytesIO(content_bytes))
+    writer  = PdfWriter()
+
+    for i in range(len(content.pages)):
+        bg = tmpl.pages[0]
+        bg.merge_page(content.pages[i])
+        writer.add_page(bg)
+
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out.read()

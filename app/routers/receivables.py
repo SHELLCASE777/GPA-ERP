@@ -128,7 +128,20 @@ def update_receivable(
     ar = _get_or_404(ar_id, db)
     before = model_to_dict(ar)
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Once confirmed, the receivable drives the project budget ceiling —
+    # amount/project can no longer be changed, only payment tracking fields.
+    if ar.status == ARStatus.CONFIRMED:
+        for locked_field in ("amount", "project_id"):
+            if locked_field in updates and updates[locked_field] != getattr(ar, locked_field):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot change '{locked_field}' on a confirmed receivable — it drives the project budget ceiling",
+                )
+            updates.pop(locked_field, None)
+
+    for field, value in updates.items():
         setattr(ar, field, value)
 
     if ar.actual_payment is not None and ar.remaining_amount is None:

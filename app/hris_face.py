@@ -1,17 +1,15 @@
 """
-GPA-ERP HRIS — Face verification engine (H2)
+GPA-ERP HRIS — Face detection (simplified)
 
-Uses deepface (FaceNet/ArcFace) for server-side face identity verification.
-Client-side face-api.js handles liveness detection; this module does identity matching.
+Only checks whether a human face is present in a selfie image.
+No identity matching, no stored embeddings, no registration step required.
 
 Usage:
-    from app.hris_face import register_face, verify_face
+    from app.hris_face import detect_face
 
-    # Register (HR admin action, stored on Employee.face_embedding)
-    embedding = register_face(image_bytes)          # returns list[float]
-
-    # Verify clock-in selfie
-    verified, confidence = verify_face(stored_embedding, selfie_bytes)
+    face_found, confidence = detect_face(image_bytes)
+    # face_found   : bool  — True if at least one face detected
+    # confidence   : float — detection confidence 0.0–1.0 (0.0 if no face / unavailable)
 """
 from __future__ import annotations
 
@@ -21,98 +19,66 @@ from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-# deepface is an optional heavy dependency — gracefully degrade if not installed
+# deepface is an optional dependency — gracefully degrade if not installed
 try:
     import numpy as np
     from deepface import DeepFace
     _DEEPFACE_AVAILABLE = True
 except ImportError:
     _DEEPFACE_AVAILABLE = False
-    logger.warning("deepface not installed — face verification disabled. Run: pip install deepface")
+    logger.warning(
+        "deepface not installed — face detection disabled (clock-in still allowed). "
+        "Run: pip install deepface"
+    )
 
-
-# Cosine similarity threshold for identity match (0.80 = 80% similar)
-_THRESHOLD = 0.80
-_MODEL_NAME = "Facenet"    # fast + accurate; alternatives: "ArcFace", "VGG-Face"
+# opencv-only detector: lightweight, no extra model download required
+_DETECTOR = "opencv"
+# Minimum confidence to count a detection as a real face (reduces false positives)
+_MIN_CONFIDENCE = 0.5
 
 
 def _bytes_to_array(image_bytes: bytes):
-    """Convert raw image bytes to a numpy array for deepface."""
+    """Convert raw image bytes → numpy array (RGB)."""
     import numpy as np
     from PIL import Image
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     return np.array(img)
 
 
-def register_face(image_bytes: bytes) -> list[float]:
+def detect_face(image_bytes: bytes) -> tuple[bool, float]:
     """
-    Extract a face embedding from an image.
-    Returns a list of floats (128-dim for FaceNet) to store in Employee.face_embedding.
-    Raises ValueError if no face detected.
-    """
-    if not _DEEPFACE_AVAILABLE:
-        raise RuntimeError("deepface not installed. Run: pip install deepface")
+    Detect whether at least one face is present in the image.
 
-    img_array = _bytes_to_array(image_bytes)
-    try:
-        result = DeepFace.represent(
-            img_path   = img_array,
-            model_name = _MODEL_NAME,
-            enforce_detection = True,
-            detector_backend  = "opencv",
-        )
-        if not result:
-            raise ValueError("No face detected in the image")
-        # DeepFace.represent returns list of dicts; take first face
-        embedding: list[float] = result[0]["embedding"]
-        return embedding
-    except Exception as e:
-        raise ValueError(f"Face registration failed: {e}") from e
+    Returns:
+        (face_found: bool, confidence: float 0.0–1.0)
 
-
-def verify_face(
-    stored_embedding: list[float],
-    selfie_bytes:     bytes,
-) -> tuple[bool, float]:
-    """
-    Compare a stored embedding against a new selfie.
-    Returns (verified: bool, confidence: float 0.0–1.0).
+    If deepface is not installed, returns (False, 0.0) — clock-in proceeds
+    without face validation and `face_verified` stays False on the record.
     """
     if not _DEEPFACE_AVAILABLE:
-        logger.warning("deepface unavailable — skipping face verification")
-        return False, 0.0
-
-    if not stored_embedding:
+        logger.debug("deepface unavailable — skipping face detection")
         return False, 0.0
 
     try:
-        import numpy as np
-
-        selfie_array = _bytes_to_array(selfie_bytes)
-        result = DeepFace.represent(
-            img_path   = selfie_array,
-            model_name = _MODEL_NAME,
-            enforce_detection = True,
-            detector_backend  = "opencv",
+        img_array = _bytes_to_array(image_bytes)
+        # extract_faces returns a list of dicts with keys: face, facial_area, confidence
+        # enforce_detection=False means no exception if no face found
+        faces = DeepFace.extract_faces(
+            img_path          = img_array,
+            detector_backend  = _DETECTOR,
+            enforce_detection = False,
+            align             = False,   # skip alignment for speed
         )
-        if not result:
+
+        # Filter to confident detections only
+        valid = [f for f in faces if f.get("confidence", 0) >= _MIN_CONFIDENCE]
+
+        if not valid:
             return False, 0.0
 
-        selfie_embedding = np.array(result[0]["embedding"])
-        stored           = np.array(stored_embedding)
+        best_confidence = max(f.get("confidence", 0.0) for f in valid)
+        return True, round(float(best_confidence), 3)
 
-        # Cosine similarity
-        dot      = float(np.dot(stored, selfie_embedding))
-        norm_a   = float(np.linalg.norm(stored))
-        norm_b   = float(np.linalg.norm(selfie_embedding))
-        if norm_a == 0 or norm_b == 0:
-            return False, 0.0
-
-        confidence = dot / (norm_a * norm_b)
-        confidence = max(0.0, min(1.0, confidence))  # clamp to [0, 1]
-        verified   = confidence >= _THRESHOLD
-        return verified, round(confidence, 3)
-
-    except Exception as e:
-        logger.warning(f"Face verification error: {e}")
+    except Exception as exc:
+        logger.warning("Face detection error: %s", exc)
         return False, 0.0

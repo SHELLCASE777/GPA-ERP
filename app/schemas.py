@@ -14,11 +14,13 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 
 from app.models import (
     ARStatus, CostCodeCategory, DocStatus, DocType,
-    ExpenseStatus, ItemCategory, PettyCashReportStatus, ProjectStatus, RoleName, TxnType,
+    ExpenseStatus, ExpenseType, ItemCategory, PettyCashReportStatus, ProjectStatus, RoleName, TxnType,
     EmpDocType, EmployeeStatus, EmploymentType,
-    AttendanceSource, LeaveRequestStatus,
+    AttendanceSource, LeaveCategory, LeaveRequestStatus,
     SalaryComponentType, PayrollStatus, PPh21Method,
     PostingStatus, ApplicantStage, ApplicantSource, InterviewResult,
+    WorkLocationType,
+    OvertimeRequestStatus, DataChangeStatus,
 )
 
 
@@ -322,14 +324,23 @@ class ARResponse(ORMBase):
 # ─── Expense ─────────────────────────────────────────────────────────────────
 
 class ExpenseCreate(BaseModel):
-    project_id:     int
-    cost_code_id:   int
+    expense_type:   ExpenseType = ExpenseType.REGULAR
+    project_id:     int | None = None   # required for regular, optional for reimbursement
+    cost_code_id:   int | None = None   # optional — auto-assigned for STAFF/WORKER reimbursements
     cost_centre_id: int | None = None
     amount:         Decimal = Field(gt=Decimal("0"), decimal_places=2)
     description:    str     = Field(min_length=3, max_length=2000)
     vendor_name:    str | None = Field(None, max_length=255)
     reference_no:   str | None = Field(None, max_length=100)
     receipt_url:    str | None = None
+
+    @model_validator(mode="after")
+    def project_required_for_regular(self) -> "ExpenseCreate":
+        if self.expense_type == ExpenseType.REGULAR and self.project_id is None:
+            raise ValueError("project_id is required for regular expenses")
+        if self.expense_type == ExpenseType.REGULAR and self.cost_code_id is None:
+            raise ValueError("cost_code_id is required for regular expenses")
+        return self
 
 
 class ExpenseUpdate(BaseModel):
@@ -360,7 +371,8 @@ class ExpenseStats(BaseModel):
 
 class ExpenseResponse(ORMBase):
     id:                    int
-    project_id:            int
+    expense_type:          ExpenseType = ExpenseType.REGULAR
+    project_id:            int | None
     cost_code_id:          int
     cost_centre_id:        int | None
     petty_cash_line_id:    int | None = None
@@ -373,6 +385,7 @@ class ExpenseResponse(ORMBase):
     over_budget:           bool | None = None
     budget_remaining:      Decimal | None = None
     submitted_by:          int | None
+    receipt_reviewed_by:   int | None = None
     verified_by:           int | None
     approved_by:           int | None
     paid_by:               int | None
@@ -720,7 +733,9 @@ class EmployeeUpdate(BaseModel):
     bank_account: str | None            = Field(None, max_length=50)
     bpjs_tk_no:   str | None            = Field(None, max_length=30)
     bpjs_kes_no:  str | None            = Field(None, max_length=30)
-    user_id:      int | None            = None
+    user_id:          int | None            = None
+    work_location_id: int | None            = None
+    ptkp_status:      str | None            = Field(None, max_length=10)
 
 
 class EmployeeDocumentResponse(ORMBase):
@@ -762,6 +777,69 @@ class EmployeeResponse(ORMBase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# HRIS Schemas — Work Locations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class WorkLocationCreate(BaseModel):
+    name:          str             = Field(min_length=1, max_length=255)
+    location_type: WorkLocationType = WorkLocationType.OTHER
+    latitude:      Decimal
+    longitude:     Decimal
+    radius_meters: int             = Field(default=100, ge=10, le=50000)
+    is_active:     bool            = True
+
+
+class WorkLocationUpdate(BaseModel):
+    name:          str | None             = None
+    location_type: WorkLocationType | None = None
+    latitude:      Decimal | None         = None
+    longitude:     Decimal | None         = None
+    radius_meters: int | None             = Field(None, ge=10, le=50000)
+    is_active:     bool | None            = None
+
+
+class WorkLocationResponse(ORMBase):
+    id:            int
+    name:          str
+    location_type: WorkLocationType
+    latitude:      Decimal
+    longitude:     Decimal
+    radius_meters: int
+    is_active:     bool
+    created_at:    datetime
+    updated_at:    datetime
+
+
+# ─── WorkGroup schemas ────────────────────────────────────────────────────────
+
+class WorkGroupCreate(ORMBase):
+    name:        str
+    role:        RoleName
+    description: str | None = None
+    is_active:   bool = True
+
+class WorkGroupUpdate(ORMBase):
+    name:        str | None = None
+    description: str | None = None
+    is_active:   bool | None = None
+
+class EmployeeSummary(ORMBase):
+    id:          int
+    employee_no: str
+    full_name:   str
+
+class WorkGroupResponse(ORMBase):
+    id:          int
+    name:        str
+    role:        RoleName
+    description: str | None
+    is_active:   bool
+    members:     list[EmployeeSummary] = []
+    created_at:  datetime
+    updated_at:  datetime
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HRIS Schemas — Phase H2: Absensi & Cuti
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -781,12 +859,25 @@ class AttendanceRecordResponse(ORMBase):
     latitude:               Decimal | None
     longitude:              Decimal | None
     accuracy:               Decimal | None
+    location_ok:            bool | None
+    location_distance_m:    Decimal | None
     selfie_url:             str | None
     face_verified:          bool
     face_confidence:        Decimal | None
     note:                   str | None
+    matched_location_name:  str | None = None
+    matched_location_type:  str | None = None
     created_at:             datetime
     updated_at:             datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_matched_location(cls, data):
+        if hasattr(data, "matched_work_location") and data.matched_work_location is not None:
+            wl = data.matched_work_location
+            data.__dict__["matched_location_name"] = wl.name
+            data.__dict__["matched_location_type"] = wl.location_type.value if wl.location_type else None
+        return data
 
 
 class AttendanceManualCreate(BaseModel):
@@ -813,23 +904,27 @@ class AttendanceSummaryItem(ORMBase):
 # ─── Leave Types ─────────────────────────────────────────────────────────────
 
 class LeaveTypeCreate(BaseModel):
-    code:               str  = Field(min_length=1, max_length=50)
-    name:               str  = Field(min_length=1, max_length=255)
-    max_days_per_year:  int | None = Field(None, ge=1)
-    is_paid:            bool = True
-    requires_approval:  bool = True
-    is_active:          bool = True
+    code:                str  = Field(min_length=1, max_length=50)
+    name:                str  = Field(min_length=1, max_length=255)
+    max_days_per_year:   int | None = Field(None, ge=1)
+    is_paid:             bool = True
+    requires_approval:   bool = True
+    is_active:           bool = True
+    category:            LeaveCategory = LeaveCategory.ANNUAL
+    requires_doctor_cert: bool = False
 
 
 class LeaveTypeResponse(ORMBase):
-    id:                 int
-    code:               str
-    name:               str
-    max_days_per_year:  int | None
-    is_paid:            bool
-    requires_approval:  bool
-    is_active:          bool
-    created_at:         datetime
+    id:                  int
+    code:                str
+    name:                str
+    max_days_per_year:   int | None
+    is_paid:             bool
+    requires_approval:   bool
+    is_active:           bool
+    category:            LeaveCategory
+    requires_doctor_cert: bool
+    created_at:          datetime
 
 
 # ─── Leave Balance ───────────────────────────────────────────────────────────
@@ -848,7 +943,7 @@ class LeaveBalanceResponse(ORMBase):
 # ─── Leave Request ───────────────────────────────────────────────────────────
 
 class LeaveRequestCreate(BaseModel):
-    employee_id:   int
+    employee_id:   int | None = None   # optional: resolved from current_user if omitted
     leave_type_id: int
     start_date:    date
     end_date:      date
@@ -1064,3 +1159,161 @@ class HireRequest(BaseModel):
     grade_id:       int | None = None
     join_date:      date | None = None
     create_user:    bool = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HRIS Schemas — Enhancement Pack (Config, Self-Service, Analytics)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Org Chart ───────────────────────────────────────────────────────────────
+
+class DepartmentNode(ORMBase):
+    """Recursive department tree node with headcount and open positions."""
+    id:             int
+    code:           str
+    name:           str
+    parent_id:      int | None
+    is_active:      bool
+    headcount:      int = 0
+    open_positions: int = 0
+    children:       list["DepartmentNode"] = []
+
+DepartmentNode.model_rebuild()
+
+
+# ─── HRIS Dashboard Stats ─────────────────────────────────────────────────────
+
+class HeadcountTrendItem(BaseModel):
+    month: str     # "2025-01"
+    count: int
+
+class DeptAttendanceItem(BaseModel):
+    dept:     str
+    rate_pct: float
+
+class PkwtAlertItem(BaseModel):
+    id:           int
+    employee_no:  str
+    full_name:    str
+    dept:         str | None
+    end_date:     date | None
+    days_left:    int
+
+class HrisDashboardStats(BaseModel):
+    # Headcount
+    total_employees:     int
+    active:              int
+    probation:           int
+    terminated_ytd:      int
+    hired_ytd:           int
+    # Trend
+    headcount_trend:     list[HeadcountTrendItem]
+    # PKWT expiry
+    pkwt_expiring_30d:   int
+    pkwt_expiring_60d:   int
+    pkwt_expiring_90d:   int
+    pkwt_expiring_list:  list[PkwtAlertItem]
+    # Leave
+    leave_liability_days: int
+    # Attendance
+    attendance_rate_pct:  float
+    dept_attendance:      list[DeptAttendanceItem]
+
+
+# ─── Holiday Calendar ────────────────────────────────────────────────────────
+
+class HolidayCalendarCreate(BaseModel):
+    date:        date
+    name:        str = Field(min_length=1, max_length=255)
+    is_national: bool = True
+
+class HolidayCalendarResponse(ORMBase):
+    id:          int
+    date:        date
+    name:        str
+    is_national: bool
+    year:        int
+    created_at:  datetime
+
+
+# ─── Overtime Request ────────────────────────────────────────────────────────
+
+class OvertimeRequestCreate(BaseModel):
+    date:          date
+    planned_hours: float = Field(gt=0, le=12)
+    reason:        str = Field(min_length=1)
+
+class OvertimeRequestResponse(ORMBase):
+    id:               int
+    employee_id:      int
+    date:             date
+    planned_hours:    Decimal
+    reason:           str
+    status:           OvertimeRequestStatus
+    approved_by:      int | None
+    approved_at:      datetime | None
+    rejection_reason: str | None
+    attendance_id:    int | None
+    created_at:       datetime
+    employee_name:    str | None = None
+
+    @classmethod
+    def from_orm_with_name(cls, obj: Any) -> "OvertimeRequestResponse":
+        data = cls.model_validate(obj)
+        data.employee_name = obj.employee.full_name if obj.employee else None
+        return data
+
+class OvertimeActionRequest(BaseModel):
+    note: str | None = None
+
+
+# ─── Employee Data Change Request ────────────────────────────────────────────
+
+# Fields employees are allowed to request changes for
+CHANGEABLE_FIELDS = {
+    "phone", "email", "bank_name", "bank_account", "npwp", "bpjs_tk_no", "bpjs_kes_no",
+}
+
+class DataChangeRequestCreate(BaseModel):
+    field_name: str = Field(min_length=1, max_length=100)
+    new_value:  str = Field(min_length=1)
+    reason:     str | None = None
+
+class DataChangeRequestResponse(ORMBase):
+    id:           int
+    employee_id:  int
+    field_name:   str
+    old_value:    str | None
+    new_value:    str
+    reason:       str | None
+    status:       DataChangeStatus
+    reviewed_by:  int | None
+    reviewed_at:  datetime | None
+    review_note:  str | None
+    created_at:   datetime
+
+class DataChangeActionRequest(BaseModel):
+    note: str | None = None
+
+
+# ─── Team Leave Calendar ─────────────────────────────────────────────────────
+
+class LeaveCalendarItem(BaseModel):
+    employee_id:   int
+    employee_name: str
+    dept:          str | None
+    leave_type:    str
+    start_date:    date
+    end_date:      date
+    days:          int
+    status:        str
+
+
+# ─── Employee Documents Hub ──────────────────────────────────────────────────
+
+class MyDocumentItem(BaseModel):
+    doc_type:     str          # "payslip", "KTP", "BPJS_TK", etc.
+    name:         str          # display name
+    date:         date | None  # issued/uploaded date
+    file_url:     str
+    period_label: str | None = None  # "Januari 2025" for payslips

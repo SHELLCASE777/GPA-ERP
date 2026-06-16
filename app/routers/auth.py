@@ -1,10 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.audit import write_audit
+from app.config import get_settings
 from app.database import get_db
 from app.dependencies import (
     create_access_token, get_client_ip, get_current_user, verify_password,
@@ -14,13 +15,15 @@ from app.models import AppMenu, User
 from app.schemas import TokenResponse, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+settings = get_settings()
 
 
 @router.post("/login", response_model=TokenResponse, summary="Obtain JWT access token")
 def login(
-    request: Request,
-    form:    Annotated[OAuth2PasswordRequestForm, Depends()],
-    db:      Annotated[Session, Depends(get_db)],
+    request:  Request,
+    response: Response,
+    form:     Annotated[OAuth2PasswordRequestForm, Depends()],
+    db:       Annotated[Session, Depends(get_db)],
 ):
     user = db.query(User).filter(User.email == form.username.lower()).first()
     if not user or not verify_password(form.password, user.hashed_password):
@@ -34,6 +37,17 @@ def login(
 
     token, expires_in = create_access_token({"sub": str(user.id), "role": user.role.name.value})
 
+    # Set httpOnly cookie (works for browser clients; Bearer header fallback kept for API/mobile)
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=not settings.DEBUG,  # False in dev (HTTP), True in prod (HTTPS)
+        samesite="lax",
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
     write_audit(
         db, "User", user.id, "LOGIN",
         changed_by=user.id,
@@ -41,6 +55,12 @@ def login(
     )
     db.commit()
     return TokenResponse(access_token=token, expires_in=expires_in)
+
+
+@router.post("/logout", summary="Clear auth cookie and log out")
+def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    return {"detail": "Logged out"}
 
 
 @router.get("/me", response_model=UserResponse, summary="Current user profile")

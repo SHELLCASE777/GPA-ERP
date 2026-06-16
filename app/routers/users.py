@@ -1,3 +1,5 @@
+import secrets
+import string
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -9,11 +11,25 @@ from app.dependencies import (
     CurrentUser, get_client_ip, hash_password, verify_password, require_role, super_admin_only,
 )
 from app.models import Role, RoleName, User
-from app.schemas import MessageResponse, PasswordChange, UserCreate, UserResponse, UserSelfUpdate, UserUpdate
+from app.schemas import (
+    MessageResponse, PasswordChange, PasswordResetResponse,
+    UserCreate, UserResponse, UserSelfUpdate, UserUpdate,
+)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
 _manage_roles = (RoleName.SUPER_ADMIN, RoleName.MD)
+
+
+def _generate_password(length: int = 12) -> str:
+    """Generate a random temp password: at least one uppercase, one digit, one symbol."""
+    alphabet = string.ascii_letters + string.digits + "!@#$"
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw)
+                and any(c in "!@#$" for c in pw)):
+            return pw
 
 
 @router.get("/roles", summary="List all roles")
@@ -99,11 +115,40 @@ def change_my_password(
 
     before = model_to_dict(current_user)
     current_user.hashed_password = hash_password(payload.new_password)
+    current_user.must_change_password = False
     write_audit(db, "User", current_user.id, "PASSWORD_CHANGE",
                 changed_by=current_user.id, ip_address=get_client_ip(request),
                 before=before, after=model_to_dict(current_user))
     db.commit()
     return MessageResponse(message="Password berhasil diubah")
+
+
+@router.post("/{user_id}/reset-password", response_model=PasswordResetResponse,
+             summary="Admin: reset a user's password to a temporary one")
+def reset_user_password(
+    user_id:      int,
+    request:      Request,
+    current_user: Annotated[User, Depends(require_role(*_manage_roles))],
+    db:           Annotated[Session, Depends(get_db)],
+):
+    """Generate a new temporary password for a user and flag them to change it on
+    next login. The temp password is returned once to the admin to hand off."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    temp_password = _generate_password()
+    before = model_to_dict(user)
+    user.hashed_password = hash_password(temp_password)
+    user.must_change_password = True
+    write_audit(db, "User", user.id, "PASSWORD_RESET",
+                changed_by=current_user.id, ip_address=get_client_ip(request),
+                before=before, after=model_to_dict(user))
+    db.commit()
+    return PasswordResetResponse(
+        message=f"Password reset for {user.full_name}. Share the temporary password securely.",
+        temp_password=temp_password,
+    )
 
 
 @router.get("/{user_id}", response_model=UserResponse)

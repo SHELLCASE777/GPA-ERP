@@ -125,6 +125,7 @@ class User(Base, TimestampMixin):
     full_name:      Mapped[str]  = mapped_column(String(255), nullable=False)
     role_id:        Mapped[int]  = mapped_column(ForeignKey("roles.id"), nullable=False)
     is_active:      Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     role: Mapped["Role"] = relationship("Role", back_populates="users")
 

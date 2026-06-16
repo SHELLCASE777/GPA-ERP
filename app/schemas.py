@@ -99,6 +99,12 @@ class UserResponse(ORMBase):
     is_active:  bool
     role:       RoleResponse
     created_at: datetime
+    must_change_password: bool = False
+
+
+class PasswordResetResponse(BaseModel):
+    message:       str
+    temp_password: str
 
 
 class UserSummary(ORMBase):

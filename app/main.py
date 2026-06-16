@@ -27,6 +27,12 @@ def _ensure_incremental_schema():
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
     with engine.begin() as conn:
+        if "users" in table_names:
+            cols = {c["name"] for c in inspector.get_columns("users")}
+            if "must_change_password" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT FALSE"
+                ))
         if "projects" in table_names:
             cols = {c["name"] for c in inspector.get_columns("projects")}
             if "currency" not in cols:

@@ -41,6 +41,7 @@ class RoleName(str, enum.Enum):
     FINANCE      = "FINANCE"
     GA           = "GA"
     STAFF        = "STAFF"
+    WORKER       = "WORKER"   # Site/field worker — HRIS self-service only
 
 
 class ProjectStatus(str, enum.Enum):
@@ -51,11 +52,12 @@ class ProjectStatus(str, enum.Enum):
 
 
 class CostCodeCategory(str, enum.Enum):
-    DIRECT    = "Direct"
-    SITE      = "Site"
-    PERSONNEL = "Personnel"
-    OVERHEAD  = "Overhead"
-    OTHER     = "Other"
+    DIRECT        = "Direct"
+    SITE          = "Site"
+    PERSONNEL     = "Personnel"
+    OVERHEAD      = "Overhead"
+    OTHER         = "Other"
+    REIMBURSEMENT = "Reimbursement"
 
 
 class ARStatus(str, enum.Enum):
@@ -85,6 +87,11 @@ class ExpenseStatus(str, enum.Enum):
     PAID        = "paid"         # finance disbursed
     HARD_LOCKED = "hard_locked"  # immutable — closed period
     REJECTED    = "rejected"
+
+
+class ExpenseType(str, enum.Enum):
+    REGULAR       = "regular"        # standard project-linked expense
+    REIMBURSEMENT = "reimbursement"  # personal out-of-pocket claim (staff/worker)
 
 
 class PettyCashReportStatus(str, enum.Enum):
@@ -299,7 +306,7 @@ class CostCode(Base, TimestampMixin):
     code:      Mapped[str]              = mapped_column(String(50), unique=True, nullable=False, index=True)
     name:      Mapped[str]              = mapped_column(String(255), nullable=False)
     parent_id: Mapped[int|None]         = mapped_column(ForeignKey("cost_codes.id"), nullable=True)
-    category:  Mapped[CostCodeCategory] = mapped_column(SAEnum(CostCodeCategory), nullable=False)
+    category:  Mapped[CostCodeCategory] = mapped_column(SAEnum(CostCodeCategory, values_callable=lambda x: [e.value for e in x]), nullable=False)
     is_active: Mapped[bool]             = mapped_column(Boolean, default=True, nullable=False)
 
     parent:   Mapped["CostCode|None"]  = relationship("CostCode", remote_side="CostCode.id", back_populates="children")
@@ -355,7 +362,7 @@ class ApprovalRule(Base, TimestampMixin):
     id:                   Mapped[int]                  = mapped_column(Integer, primary_key=True)
     min_amount:           Mapped[Decimal]              = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
     max_amount:           Mapped[Decimal|None]         = mapped_column(Numeric(18, 2), nullable=True)
-    cost_code_category:   Mapped[CostCodeCategory|None]= mapped_column(SAEnum(CostCodeCategory), nullable=True)
+    cost_code_category:   Mapped[CostCodeCategory|None]= mapped_column(SAEnum(CostCodeCategory, values_callable=lambda x: [e.value for e in x]), nullable=True)
     required_role:        Mapped[RoleName]             = mapped_column(SAEnum(RoleName), nullable=False)
     priority:             Mapped[int]                  = mapped_column(Integer, nullable=False, default=1)
     is_active:            Mapped[bool]                 = mapped_column(Boolean, default=True, nullable=False)
@@ -420,25 +427,30 @@ class Expense(Base, TimestampMixin):
     """
     __tablename__ = "expenses"
 
-    id:              Mapped[int]           = mapped_column(Integer, primary_key=True)
-    project_id:      Mapped[int]           = mapped_column(ForeignKey("projects.id"), nullable=False)
-    cost_code_id:    Mapped[int]           = mapped_column(ForeignKey("cost_codes.id"), nullable=False)
-    cost_centre_id:  Mapped[int|None]      = mapped_column(ForeignKey("cost_centres.id"), nullable=True)
-    petty_cash_line_id: Mapped[int|None]   = mapped_column(ForeignKey("petty_cash_report_lines.id"), nullable=True)
-    amount:          Mapped[Decimal]       = mapped_column(Numeric(18, 2), nullable=False)
-    description:     Mapped[str]           = mapped_column(Text, nullable=False)
-    vendor_name:     Mapped[str|None]      = mapped_column(String(255), nullable=True)
-    reference_no:    Mapped[str|None]      = mapped_column(String(100), nullable=True)
-    receipt_url:     Mapped[str|None]      = mapped_column(String(2048), nullable=True)
-    status:          Mapped[ExpenseStatus] = mapped_column(
+    id:                 Mapped[int]           = mapped_column(Integer, primary_key=True)
+    expense_type:       Mapped[ExpenseType]   = mapped_column(
+        SAEnum(ExpenseType, values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=ExpenseType.REGULAR
+    )
+    project_id:         Mapped[int|None]      = mapped_column(ForeignKey("projects.id"), nullable=True)
+    cost_code_id:       Mapped[int]           = mapped_column(ForeignKey("cost_codes.id"), nullable=False)
+    cost_centre_id:     Mapped[int|None]      = mapped_column(ForeignKey("cost_centres.id"), nullable=True)
+    petty_cash_line_id: Mapped[int|None]      = mapped_column(ForeignKey("petty_cash_report_lines.id"), nullable=True)
+    amount:             Mapped[Decimal]       = mapped_column(Numeric(18, 2), nullable=False)
+    description:        Mapped[str]           = mapped_column(Text, nullable=False)
+    vendor_name:        Mapped[str|None]      = mapped_column(String(255), nullable=True)
+    reference_no:       Mapped[str|None]      = mapped_column(String(100), nullable=True)
+    receipt_url:        Mapped[str|None]      = mapped_column(String(2048), nullable=True)
+    status:             Mapped[ExpenseStatus] = mapped_column(
         SAEnum(ExpenseStatus), nullable=False, default=ExpenseStatus.DRAFT
     )
 
     # Actor FKs
-    submitted_by:    Mapped[int|None]      = mapped_column(ForeignKey("users.id"), nullable=True)
-    verified_by:     Mapped[int|None]      = mapped_column(ForeignKey("users.id"), nullable=True)
-    approved_by:     Mapped[int|None]      = mapped_column(ForeignKey("users.id"), nullable=True)
-    paid_by:         Mapped[int|None]      = mapped_column(ForeignKey("users.id"), nullable=True)
+    submitted_by:         Mapped[int|None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    receipt_reviewed_by:  Mapped[int|None] = mapped_column(ForeignKey("users.id"), nullable=True)  # GA receipt check
+    verified_by:          Mapped[int|None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_by:          Mapped[int|None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    paid_by:              Mapped[int|None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     # Approval chain tracking
     current_approver_role: Mapped[str|None] = mapped_column(String(50), nullable=True)
@@ -454,10 +466,11 @@ class Expense(Base, TimestampMixin):
     petty_cash_line: Mapped["PettyCashReportLine|None"] = relationship(
         "PettyCashReportLine", back_populates="expense", foreign_keys=[petty_cash_line_id]
     )
-    submitter: Mapped["User|None"] = relationship("User", foreign_keys=[submitted_by], back_populates="submitted_expenses")
-    verifier:  Mapped["User|None"] = relationship("User", foreign_keys=[verified_by],  back_populates="verified_expenses")
-    approver:  Mapped["User|None"] = relationship("User", foreign_keys=[approved_by],  back_populates="approved_expenses")
-    payer:     Mapped["User|None"] = relationship("User", foreign_keys=[paid_by],       back_populates="paid_expenses")
+    submitter:         Mapped["User|None"] = relationship("User", foreign_keys=[submitted_by],        back_populates="submitted_expenses")
+    receipt_reviewer:  Mapped["User|None"] = relationship("User", foreign_keys=[receipt_reviewed_by], viewonly=True)
+    verifier:          Mapped["User|None"] = relationship("User", foreign_keys=[verified_by],          back_populates="verified_expenses")
+    approver:          Mapped["User|None"] = relationship("User", foreign_keys=[approved_by],          back_populates="approved_expenses")
+    payer:             Mapped["User|None"] = relationship("User", foreign_keys=[paid_by],              back_populates="paid_expenses")
 
     __table_args__ = (
         Index("ix_expenses_project_status",  "project_id", "status"),
@@ -761,43 +774,98 @@ class JobGrade(Base, TimestampMixin):
         return f"<JobGrade {self.code} L{self.level}>"
 
 
+# ─── WorkLocation ─────────────────────────────────────────────────────────────
+
+class WorkLocationType(str, enum.Enum):
+    HOME_OFFICE = "home_office"
+    SITE        = "site"
+    OTHER       = "other"
+
+
+class WorkLocation(Base, TimestampMixin):
+    """Named work locations with GPS centre + allowed radius for clock-in validation."""
+    __tablename__ = "hris_work_locations"
+
+    id:            Mapped[int]           = mapped_column(Integer, primary_key=True)
+    name:          Mapped[str]           = mapped_column(String(255), nullable=False)
+    location_type: Mapped[WorkLocationType] = mapped_column(
+        SAEnum(WorkLocationType, values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=WorkLocationType.OTHER
+    )
+    latitude:      Mapped[Decimal]       = mapped_column(Numeric(9, 6), nullable=False)
+    longitude:     Mapped[Decimal]       = mapped_column(Numeric(9, 6), nullable=False)
+    radius_meters: Mapped[int]           = mapped_column(Integer, nullable=False, default=100)
+    is_active:     Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+
+    employees: Mapped[list["Employee"]] = relationship("Employee", back_populates="work_location")
+
+    def __repr__(self) -> str:
+        return f"<WorkLocation {self.name} r={self.radius_meters}m>"
+
+
+# ─── WorkGroup ────────────────────────────────────────────────────────────────
+
+class WorkGroup(Base, TimestampMixin):
+    """Sub-groups within STAFF or WORKER roles (e.g. Tim Admin, Tim Site A)."""
+    __tablename__ = "hris_work_groups"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True)
+    name:        Mapped[str]      = mapped_column(String(255), unique=True, nullable=False)
+    role:        Mapped[RoleName] = mapped_column(
+        SAEnum(RoleName, values_callable=lambda x: [e.value for e in x]), nullable=False
+    )
+    description: Mapped[str|None] = mapped_column(Text, nullable=True)
+    is_active:   Mapped[bool]     = mapped_column(Boolean, nullable=False, default=True)
+
+    members: Mapped[list["Employee"]] = relationship("Employee", back_populates="work_group")
+
+    def __repr__(self) -> str:
+        return f"<WorkGroup {self.name}>"
+
+
 # ─── Employee ─────────────────────────────────────────────────────────────────
 
 class Employee(Base, TimestampMixin):
     __tablename__ = "hris_employees"
 
-    id:             Mapped[int]            = mapped_column(Integer, primary_key=True)
-    employee_no:    Mapped[str]            = mapped_column(String(50), unique=True, nullable=False, index=True)
-    full_name:      Mapped[str]            = mapped_column(String(255), nullable=False)
-    nik:            Mapped[str|None]       = mapped_column(String(16), unique=True, nullable=True)
-    npwp:           Mapped[str|None]       = mapped_column(String(20), nullable=True)
-    email:          Mapped[str|None]       = mapped_column(String(320), nullable=True)
-    phone:          Mapped[str|None]       = mapped_column(String(20), nullable=True)
-    tipe:           Mapped[EmploymentType] = mapped_column(
+    id:               Mapped[int]            = mapped_column(Integer, primary_key=True)
+    employee_no:      Mapped[str]            = mapped_column(String(50), unique=True, nullable=False, index=True)
+    full_name:        Mapped[str]            = mapped_column(String(255), nullable=False)
+    nik:              Mapped[str|None]       = mapped_column(String(16), unique=True, nullable=True)
+    npwp:             Mapped[str|None]       = mapped_column(String(20), nullable=True)
+    email:            Mapped[str|None]       = mapped_column(String(320), nullable=True)
+    phone:            Mapped[str|None]       = mapped_column(String(20), nullable=True)
+    tipe:             Mapped[EmploymentType] = mapped_column(
         SAEnum(EmploymentType, values_callable=lambda x: [e.value for e in x]), nullable=False
     )
-    status:         Mapped[EmployeeStatus] = mapped_column(
+    status:           Mapped[EmployeeStatus] = mapped_column(
         SAEnum(EmployeeStatus, values_callable=lambda x: [e.value for e in x]),
         nullable=False, default=EmployeeStatus.ACTIVE
     )
-    dept_id:        Mapped[int|None]       = mapped_column(ForeignKey("hris_departments.id"), nullable=True)
-    grade_id:       Mapped[int|None]       = mapped_column(ForeignKey("hris_job_grades.id"), nullable=True)
-    site:           Mapped[str|None]       = mapped_column(String(255), nullable=True)
-    join_date:      Mapped[date|None]      = mapped_column(Date, nullable=True)
-    end_date:       Mapped[date|None]      = mapped_column(Date, nullable=True)
-    bank_name:      Mapped[str|None]       = mapped_column(String(100), nullable=True)
-    bank_account:   Mapped[str|None]       = mapped_column(String(50), nullable=True)
-    bpjs_tk_no:     Mapped[str|None]       = mapped_column(String(30), nullable=True)
-    bpjs_kes_no:    Mapped[str|None]       = mapped_column(String(30), nullable=True)
-    user_id:        Mapped[int|None]       = mapped_column(ForeignKey("users.id"), unique=True, nullable=True)
-    photo_url:      Mapped[str|None]       = mapped_column(String(500), nullable=True)
+    dept_id:          Mapped[int|None]       = mapped_column(ForeignKey("hris_departments.id"), nullable=True)
+    grade_id:         Mapped[int|None]       = mapped_column(ForeignKey("hris_job_grades.id"), nullable=True)
+    work_location_id: Mapped[int|None]       = mapped_column(ForeignKey("hris_work_locations.id"), nullable=True)
+    work_group_id:    Mapped[int|None]       = mapped_column(ForeignKey("hris_work_groups.id"), nullable=True)
+    site:             Mapped[str|None]       = mapped_column(String(255), nullable=True)
+    join_date:        Mapped[date|None]      = mapped_column(Date, nullable=True)
+    end_date:         Mapped[date|None]      = mapped_column(Date, nullable=True)
+    bank_name:        Mapped[str|None]       = mapped_column(String(100), nullable=True)
+    bank_account:     Mapped[str|None]       = mapped_column(String(50), nullable=True)
+    bpjs_tk_no:       Mapped[str|None]       = mapped_column(String(30), nullable=True)
+    bpjs_kes_no:      Mapped[str|None]       = mapped_column(String(30), nullable=True)
+    user_id:          Mapped[int|None]       = mapped_column(ForeignKey("users.id"), unique=True, nullable=True)
+    photo_url:        Mapped[str|None]       = mapped_column(String(500), nullable=True)
+    # PPh 21 PTKP status — e.g. "TK/0", "K/1". Defaults to TK/0 (single, no dependants).
+    ptkp_status:      Mapped[str|None]       = mapped_column(String(10), nullable=True, default="TK/0")
     # Face recognition embedding (JSONB list of floats)
-    face_embedding: Mapped[dict|None]      = mapped_column(JSONB, nullable=True)
+    face_embedding:   Mapped[dict|None]      = mapped_column(JSONB, nullable=True)
 
-    department: Mapped["Department|None"]       = relationship("Department", back_populates="employees")
-    grade:      Mapped["JobGrade|None"]         = relationship("JobGrade", back_populates="employees")
-    user:       Mapped["User|None"]             = relationship("User", foreign_keys=[user_id])
-    documents:  Mapped[list["EmployeeDocument"]] = relationship(
+    department:    Mapped["Department|None"]         = relationship("Department", back_populates="employees")
+    grade:         Mapped["JobGrade|None"]           = relationship("JobGrade", back_populates="employees")
+    work_location: Mapped["WorkLocation|None"]       = relationship("WorkLocation", back_populates="employees")
+    work_group:    Mapped["WorkGroup|None"]           = relationship("WorkGroup", back_populates="members")
+    user:          Mapped["User|None"]               = relationship("User", foreign_keys=[user_id])
+    documents:     Mapped[list["EmployeeDocument"]]  = relationship(
         "EmployeeDocument", back_populates="employee", cascade="all, delete-orphan"
     )
     salary_assignments: Mapped[list["SalaryAssignment"]] = relationship(
@@ -805,9 +873,11 @@ class Employee(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        Index("ix_hris_employees_dept",   "dept_id"),
-        Index("ix_hris_employees_status", "status"),
-        Index("ix_hris_employees_tipe",   "tipe"),
+        Index("ix_hris_employees_dept",          "dept_id"),
+        Index("ix_hris_employees_status",        "status"),
+        Index("ix_hris_employees_tipe",          "tipe"),
+        Index("ix_hris_employees_work_location", "work_location_id"),
+        Index("ix_hris_employees_work_group",  "work_group_id"),
     )
 
     def __repr__(self) -> str:
@@ -844,6 +914,15 @@ class AttendanceSource(str, enum.Enum):
     IMPORT       = "import"
 
 
+class LeaveCategory(str, enum.Enum):
+    ANNUAL    = "annual"
+    SICK      = "sick"
+    MATERNITY = "maternity"
+    PATERNITY = "paternity"
+    UNPAID    = "unpaid"
+    OTHER     = "other"
+
+
 class LeaveRequestStatus(str, enum.Enum):
     DRAFT     = "draft"
     SUBMITTED = "submitted"
@@ -873,13 +952,17 @@ class AttendanceRecord(Base, TimestampMixin):
     latitude:               Mapped[Decimal|None]     = mapped_column(Numeric(9, 6), nullable=True)
     longitude:              Mapped[Decimal|None]     = mapped_column(Numeric(9, 6), nullable=True)
     accuracy:               Mapped[Decimal|None]     = mapped_column(Numeric(10, 2), nullable=True)  # metres
+    location_ok:            Mapped[bool|None]        = mapped_column(Boolean, nullable=True)         # within radius?
+    location_distance_m:    Mapped[Decimal|None]     = mapped_column(Numeric(10, 1), nullable=True)  # distance to work location centre
     # Selfie / face verification
     selfie_url:             Mapped[str|None]         = mapped_column(String(500), nullable=True)
     face_verified:          Mapped[bool]             = mapped_column(Boolean, nullable=False, default=False)
     face_confidence:        Mapped[Decimal|None]     = mapped_column(Numeric(4, 3), nullable=True)  # 0.000–1.000
     note:                   Mapped[str|None]         = mapped_column(Text, nullable=True)
+    matched_work_location_id: Mapped[int|None] = mapped_column(ForeignKey("hris_work_locations.id"), nullable=True)
 
     employee: Mapped["Employee"] = relationship("Employee", foreign_keys=[employee_id])
+    matched_work_location: Mapped["WorkLocation|None"] = relationship("WorkLocation", foreign_keys=[matched_work_location_id])
 
     __table_args__ = (
         UniqueConstraint("employee_id", "date", name="uq_attendance_emp_date"),
@@ -896,13 +979,18 @@ class AttendanceRecord(Base, TimestampMixin):
 class LeaveType(Base, TimestampMixin):
     __tablename__ = "hris_leave_types"
 
-    id:                  Mapped[int]      = mapped_column(Integer, primary_key=True)
-    code:                Mapped[str]      = mapped_column(String(50), unique=True, nullable=False, index=True)
-    name:                Mapped[str]      = mapped_column(String(255), nullable=False)
-    max_days_per_year:   Mapped[int|None] = mapped_column(Integer, nullable=True)   # null = unlimited
-    is_paid:             Mapped[bool]     = mapped_column(Boolean, nullable=False, default=True)
-    requires_approval:   Mapped[bool]     = mapped_column(Boolean, nullable=False, default=True)
-    is_active:           Mapped[bool]     = mapped_column(Boolean, nullable=False, default=True)
+    id:                  Mapped[int]           = mapped_column(Integer, primary_key=True)
+    code:                Mapped[str]           = mapped_column(String(50), unique=True, nullable=False, index=True)
+    name:                Mapped[str]           = mapped_column(String(255), nullable=False)
+    max_days_per_year:   Mapped[int|None]      = mapped_column(Integer, nullable=True)   # null = unlimited
+    is_paid:             Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    requires_approval:   Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    is_active:           Mapped[bool]          = mapped_column(Boolean, nullable=False, default=True)
+    category:            Mapped[LeaveCategory] = mapped_column(
+        SAEnum(LeaveCategory, values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=LeaveCategory.ANNUAL
+    )
+    requires_doctor_cert: Mapped[bool]         = mapped_column(Boolean, nullable=False, default=False)
 
     balances:  Mapped[list["LeaveBalance"]]  = relationship("LeaveBalance",  back_populates="leave_type")
     requests:  Mapped[list["LeaveRequest"]]  = relationship("LeaveRequest",  back_populates="leave_type")
@@ -1235,3 +1323,102 @@ class OnboardingTask(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<OnboardingTask '{self.task[:40]}' done={self.is_completed}>"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HRIS — Enhancement Pack: Config, Self-Service, Analytics
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── HolidayCalendar ──────────────────────────────────────────────────────────
+
+class HolidayCalendar(Base, TimestampMixin):
+    """National and company holidays used by overtime calculation engine."""
+    __tablename__ = "hris_holiday_calendar"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True)
+    date:        Mapped[date]     = mapped_column(Date, unique=True, nullable=False, index=True)
+    name:        Mapped[str]      = mapped_column(String(255), nullable=False)
+    is_national: Mapped[bool]     = mapped_column(Boolean, nullable=False, default=True)
+    year:        Mapped[int]      = mapped_column(Integer, nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<HolidayCalendar {self.date} {self.name}>"
+
+
+# ─── OvertimeRequest ──────────────────────────────────────────────────────────
+
+class OvertimeRequestStatus(str, enum.Enum):
+    DRAFT     = "draft"
+    SUBMITTED = "submitted"
+    APPROVED  = "approved"
+    REJECTED  = "rejected"
+
+
+class OvertimeRequest(Base, TimestampMixin):
+    """Employee overtime request — submitted before working OT, approved by HR/MD."""
+    __tablename__ = "hris_overtime_requests"
+
+    id:               Mapped[int]                  = mapped_column(Integer, primary_key=True)
+    employee_id:      Mapped[int]                  = mapped_column(ForeignKey("hris_employees.id"), nullable=False, index=True)
+    date:             Mapped[date]                 = mapped_column(Date, nullable=False)
+    planned_hours:    Mapped[Decimal]              = mapped_column(Numeric(4, 1), nullable=False)
+    reason:           Mapped[str]                  = mapped_column(Text, nullable=False)
+    status:           Mapped[OvertimeRequestStatus]= mapped_column(
+        SAEnum(OvertimeRequestStatus, values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=OvertimeRequestStatus.SUBMITTED,
+    )
+    approved_by:      Mapped[int|None]             = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at:      Mapped[datetime|None]        = mapped_column(DateTime(timezone=True), nullable=True)
+    rejection_reason: Mapped[str|None]             = mapped_column(Text, nullable=True)
+    attendance_id:    Mapped[int|None]             = mapped_column(ForeignKey("hris_attendance_records.id"), nullable=True)
+
+    employee:    Mapped["Employee"]              = relationship("Employee", foreign_keys=[employee_id])
+    approver:    Mapped["User|None"]             = relationship("User", foreign_keys=[approved_by])
+    attendance:  Mapped["AttendanceRecord|None"] = relationship("AttendanceRecord", foreign_keys=[attendance_id])
+
+    __table_args__ = (
+        Index("ix_ot_requests_employee", "employee_id"),
+        Index("ix_ot_requests_status",   "status"),
+        Index("ix_ot_requests_date",     "date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OvertimeRequest emp={self.employee_id} date={self.date} {self.status}>"
+
+
+# ─── EmployeeDataChangeRequest ────────────────────────────────────────────────
+
+class DataChangeStatus(str, enum.Enum):
+    PENDING  = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class EmployeeDataChangeRequest(Base, TimestampMixin):
+    """Employee requests a change to their own master data (bank account, phone, etc.)."""
+    __tablename__ = "hris_data_change_requests"
+
+    id:           Mapped[int]            = mapped_column(Integer, primary_key=True)
+    employee_id:  Mapped[int]            = mapped_column(ForeignKey("hris_employees.id"), nullable=False, index=True)
+    field_name:   Mapped[str]            = mapped_column(String(100), nullable=False)   # "bank_account", "phone", etc.
+    old_value:    Mapped[str|None]       = mapped_column(Text, nullable=True)
+    new_value:    Mapped[str]            = mapped_column(Text, nullable=False)
+    reason:       Mapped[str|None]       = mapped_column(Text, nullable=True)
+    status:       Mapped[DataChangeStatus]= mapped_column(
+        SAEnum(DataChangeStatus, values_callable=lambda x: [e.value for e in x]),
+        nullable=False, default=DataChangeStatus.PENDING,
+    )
+    reviewed_by:  Mapped[int|None]       = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at:  Mapped[datetime|None]  = mapped_column(DateTime(timezone=True), nullable=True)
+    review_note:  Mapped[str|None]       = mapped_column(Text, nullable=True)
+
+    employee:   Mapped["Employee"]  = relationship("Employee", foreign_keys=[employee_id])
+    reviewer:   Mapped["User|None"] = relationship("User", foreign_keys=[reviewed_by])
+
+    __table_args__ = (
+        Index("ix_data_change_employee", "employee_id"),
+        Index("ix_data_change_status",   "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DataChangeRequest emp={self.employee_id} field={self.field_name} {self.status}>"

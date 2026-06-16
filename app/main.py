@@ -271,7 +271,7 @@ a{{color:#2746c7;font-weight:700;text-decoration:none}}</style></head>
 API_PREFIX = "/api"
 
 app.include_router(auth.router,        prefix=API_PREFIX)
-app.include_router(users.router,       prefix=API_PREFIX, dependencies=[Depends(require_menu_access("settings", "vault"))])
+app.include_router(users.router,       prefix=API_PREFIX)  # per-endpoint role guards; /me/* must stay reachable for all authenticated users
 app.include_router(projects.router,    prefix=API_PREFIX, dependencies=[Depends(require_menu_access("project_command"))])
 app.include_router(receivables.router, prefix=API_PREFIX, dependencies=[Depends(require_menu_access("revenue_ar"))])
 app.include_router(expenses.router,    prefix=API_PREFIX, dependencies=[Depends(require_menu_access("spending", "action_center"))])

@@ -100,6 +100,7 @@ class UserResponse(ORMBase):
     role:       RoleResponse
     created_at: datetime
     must_change_password: bool = False
+    employee_id: int | None = None
 
 
 class PasswordResetResponse(BaseModel):

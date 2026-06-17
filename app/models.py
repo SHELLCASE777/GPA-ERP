@@ -150,6 +150,14 @@ class User(Base, TimestampMixin):
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     role: Mapped["Role"] = relationship("Role", back_populates="users")
+    # Linked HRIS employee (pegawai) record, if any.
+    employee: Mapped["Employee|None"] = relationship(
+        "Employee", back_populates="user", uselist=False, foreign_keys="Employee.user_id"
+    )
+
+    @property
+    def employee_id(self) -> int | None:
+        return self.employee.id if self.employee else None
 
     # audit trail relations
     submitted_expenses:  Mapped[list["Expense"]] = relationship(
@@ -887,7 +895,7 @@ class Employee(Base, TimestampMixin):
     grade:         Mapped["JobGrade|None"]           = relationship("JobGrade", back_populates="employees")
     work_location: Mapped["WorkLocation|None"]       = relationship("WorkLocation", back_populates="employees")
     work_group:    Mapped["WorkGroup|None"]           = relationship("WorkGroup", back_populates="members")
-    user:          Mapped["User|None"]               = relationship("User", foreign_keys=[user_id])
+    user:          Mapped["User|None"]               = relationship("User", foreign_keys=[user_id], back_populates="employee")
     documents:     Mapped[list["EmployeeDocument"]]  = relationship(
         "EmployeeDocument", back_populates="employee", cascade="all, delete-orphan"
     )

@@ -51,6 +51,14 @@ def _generate_password(length: int = 12) -> str:
             return pw
 
 
+def _next_employee_no(db: Session) -> str:
+    """Generate a unique auto employee number like EMP0007."""
+    n = db.query(Employee).count() + 1
+    while db.query(Employee).filter(Employee.employee_no == f"EMP{n:04d}").first():
+        n += 1
+    return f"EMP{n:04d}"
+
+
 def _seed_user_menus(db: Session, user: User) -> None:
     """Seed menu permissions for a newly created user from their role preset."""
     menus = {m.key: m for m in db.query(AppMenu).filter(AppMenu.is_active == True).all()}
@@ -333,6 +341,59 @@ def create_employee(
             raise HTTPException(409, "User already linked to another employee")
 
     emp = Employee(**payload.model_dump())
+    db.add(emp)
+    db.flush()
+    write_audit(db, "Employee", emp.id, "CREATE",
+                changed_by=current_user.id, ip_address=get_client_ip(request),
+                after=model_to_dict(emp))
+    db.commit()
+    db.refresh(emp)
+    return emp
+
+
+@router.post("/employees/from-user/{user_id}", response_model=EmployeeResponse,
+             summary="Create or link an employee (pegawai) record for an existing user account")
+def employee_from_user(
+    user_id:      int,
+    request:      Request,
+    current_user: Annotated[CurrentUser, Depends(require_role(*_hr_roles))],
+    db:           Annotated[Session, Depends(get_db)],
+):
+    """Idempotent: returns the existing linked employee, links an unlinked
+    employee that shares the user's email, or creates a minimal new one. The
+    admin can then complete the details in Data Karyawan."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    existing = db.query(Employee).filter(Employee.user_id == user_id).first()
+    if existing:
+        return existing
+
+    # Link an unlinked employee with the same email, if one exists.
+    if user.email:
+        match = db.query(Employee).filter(
+            Employee.email == user.email, Employee.user_id.is_(None)
+        ).first()
+        if match:
+            before = model_to_dict(match)
+            match.user_id = user.id
+            write_audit(db, "Employee", match.id, "LINK_USER",
+                        changed_by=current_user.id, ip_address=get_client_ip(request),
+                        before=before, after=model_to_dict(match))
+            db.commit()
+            db.refresh(match)
+            return match
+
+    emp = Employee(
+        employee_no=_next_employee_no(db),
+        full_name=user.full_name,
+        email=user.email,
+        tipe=EmploymentType.TETAP,
+        status=EmployeeStatus.ACTIVE,
+        join_date=date.today(),
+        user_id=user.id,
+    )
     db.add(emp)
     db.flush()
     write_audit(db, "Employee", emp.id, "CREATE",

@@ -20,7 +20,7 @@ from app.models import (
 )
 
 # STAFF cannot create or post petty cash reports — GA and above only
-_pc_roles = (RoleName.GA, RoleName.COST_CONTROL, RoleName.PM, RoleName.FINANCE, RoleName.MD, RoleName.SUPER_ADMIN)
+_pc_roles = (RoleName.GA, RoleName.HR, RoleName.COST_CONTROL, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.FINANCE, RoleName.MD, RoleName.SUPER_ADMIN)
 PCWrite = Annotated[User, Depends(require_role(*_pc_roles))]
 from app.schemas import (
     PettyCashReportCreate, PettyCashReportResponse, PettyCashReportUpdate,
@@ -102,7 +102,7 @@ def list_reports(
     return q.order_by(PettyCashReport.id.desc()).offset(skip).limit(limit).all()
 
 
-_PC_EXPORT_ROLES = (RoleName.GA, RoleName.FINANCE, RoleName.SUPER_ADMIN)
+_PC_EXPORT_ROLES = (RoleName.GA, RoleName.HR, RoleName.FINANCE, RoleName.SUPER_ADMIN)
 _PC_EXPORT_HEADER_FILL  = PatternFill(fill_type="solid", fgColor="1E293B")
 _PC_EXPORT_HEADER_FONT  = Font(bold=True, color="FFFFFF")
 _PC_EXPORT_HEADER_ALIGN = Alignment(horizontal="center", vertical="center")

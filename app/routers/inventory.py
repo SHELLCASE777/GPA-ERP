@@ -20,7 +20,7 @@ router = APIRouter(prefix="/inventory", tags=["Inventory"])
 DB        = Annotated[Session, Depends(get_db)]
 Auth      = Annotated[User,    Depends(get_current_user)]
 # Mutations restricted to roles that manage physical stock
-_inv_roles = (RoleName.GA, RoleName.COST_CONTROL, RoleName.PM, RoleName.MD, RoleName.SUPER_ADMIN)
+_inv_roles = (RoleName.GA, RoleName.HR, RoleName.COST_CONTROL, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.MD, RoleName.SUPER_ADMIN)
 InvWrite  = Annotated[User,    Depends(require_role(*_inv_roles))]
 
 

@@ -43,8 +43,8 @@ from app.schemas import (
 
 router = APIRouter(prefix="/hris", tags=["HRIS – Attendance & Leave"])
 
-_hr_roles  = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.GA)
-_mgr_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.GA)
+_hr_roles  = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.GA, RoleName.HR)
+_mgr_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.GA, RoleName.HR)
 
 _SELFIE_DIR = Path("uploads") / "selfies"
 _SELFIE_DIR.mkdir(parents=True, exist_ok=True)
@@ -453,7 +453,7 @@ def list_attendance(
     q = db.query(AttendanceRecord)
 
     # Non-admin users can only see their own records
-    if current_user.role.name not in (*_hr_roles, RoleName.MD, RoleName.PM, RoleName.COST_CONTROL, RoleName.FINANCE):
+    if current_user.role.name not in (*_hr_roles, RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.COST_CONTROL, RoleName.FINANCE):
         my_emp = db.query(Employee).filter(Employee.user_id == current_user.id).first()
         if my_emp:
             q = q.filter(AttendanceRecord.employee_id == my_emp.id)
@@ -685,7 +685,7 @@ def export_attendance(
 
 # ─── Work Locations CRUD ─────────────────────────────────────────────────────
 
-_wl_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.GA)
+_wl_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.GA, RoleName.HR)
 
 
 @router.get("/work-locations", response_model=list[WorkLocationResponse],
@@ -809,7 +809,7 @@ def get_leave_balance(
         raise HTTPException(404, "Employee not found")
 
     # Self-service: staff can only see their own balance
-    if current_user.role.name not in (*_hr_roles, RoleName.MD, RoleName.PM):
+    if current_user.role.name not in (*_hr_roles, RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL):
         my_emp = db.query(Employee).filter(Employee.user_id == current_user.id).first()
         if not my_emp or my_emp.id != employee_id:
             raise HTTPException(403, "Access denied")

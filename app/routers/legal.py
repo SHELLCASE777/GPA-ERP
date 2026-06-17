@@ -29,7 +29,7 @@ _TYPE_CODES = {
     DocType.OTHER:        "SRT",
 }
 
-_SIGN_ROLES = (RoleName.MD, RoleName.PM, RoleName.SUPER_ADMIN)
+_SIGN_ROLES = (RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.SUPER_ADMIN)
 _SIGNATURE_TYPES = {"image/png", "image/jpeg", "image/jpg"}
 
 

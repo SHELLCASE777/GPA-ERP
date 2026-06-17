@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import CurrentUser
-from app.models import AppMenu, RoleName, User, UserMenuPermission
+from app.models import AppMenu, Role, RoleName, User, UserMenuPermission
 
 DEFAULT_MENUS = [
     ("dashboard", "Dashboard", "Workspace", "/dashboard", "Executive dashboard and KPI overview", 10),
@@ -75,6 +75,44 @@ ROLE_PRESETS: dict[str, set[str]] = {
         "hris_attendance", "hris_leave", "hris_my_payslip",
     },
 }
+
+# Alias roles inherit their target's menu set verbatim.
+ROLE_PRESETS["HR"] = set(ROLE_PRESETS["GA"])
+ROLE_PRESETS["PROJECT_CONTROL"] = set(ROLE_PRESETS["PM"])
+
+
+def ensure_all_roles(db: Session) -> None:
+    """Create a Role row for every RoleName enum member that is missing.
+    Makes newly-added roles (e.g. HR, PROJECT_CONTROL) immediately assignable."""
+    existing = {r.name for r in db.query(Role).all()}
+    changed = False
+    for name in RoleName:
+        if name not in existing:
+            db.add(Role(name=name))
+            changed = True
+    if changed:
+        db.commit()
+
+
+def seed_user_menu_permissions(db: Session, user: User) -> None:
+    """Seed a single user's menu permissions from their role preset (idempotent).
+    Used when a user is created so they have access without waiting for a restart."""
+    if user.role.name == RoleName.SUPER_ADMIN:
+        return
+    menus = {m.key: m for m in db.query(AppMenu).filter(AppMenu.is_active == True).all()}
+    existing = {
+        p.menu_id for p in db.query(UserMenuPermission)
+        .filter(UserMenuPermission.user_id == user.id).all()
+    }
+    preset_keys = ROLE_PRESETS.get(user.role.name.value, ROLE_PRESETS["STAFF"])
+    changed = False
+    for key in preset_keys:
+        menu = menus.get(key)
+        if menu and menu.id not in existing:
+            db.add(UserMenuPermission(user_id=user.id, menu_id=menu.id, can_access=True))
+            changed = True
+    if changed:
+        db.commit()
 
 
 def ensure_default_menus(db: Session) -> None:

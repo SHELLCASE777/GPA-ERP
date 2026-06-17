@@ -10,6 +10,7 @@ from app.database import get_db
 from app.dependencies import (
     CurrentUser, get_client_ip, hash_password, verify_password, require_role, super_admin_only,
 )
+from app.menu_permissions import seed_user_menu_permissions
 from app.models import Role, RoleName, User
 from app.schemas import (
     MessageResponse, PasswordChange, PasswordResetResponse,
@@ -83,6 +84,8 @@ def create_user(
                 after=model_to_dict(user))
     db.commit()
     db.refresh(user)
+    # Seed menu permissions from the role preset so the user has access immediately.
+    seed_user_menu_permissions(db, user)
     return user
 
 

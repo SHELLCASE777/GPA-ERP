@@ -63,7 +63,7 @@ def _seed_user_menus(db: Session, user: User) -> None:
 router = APIRouter(prefix="/hris", tags=["HRIS – Employees"])
 
 # Roles allowed to manage HRIS data (GA = General Affairs / HR operator)
-_hr_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.GA)
+_hr_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.GA, RoleName.HR)
 # Only these roles may assign any role when bulk-creating accounts; GA is limited
 # to non-privileged roles (see _ga_assignable) to prevent privilege escalation.
 _account_admin_roles = (RoleName.SUPER_ADMIN, RoleName.MD)

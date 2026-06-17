@@ -14,7 +14,7 @@ from sqlalchemy import inspect, text
 
 from app.config import get_settings
 from app.database import engine
-from app.menu_permissions import ensure_default_menus, require_menu_access
+from app.menu_permissions import ensure_all_roles, ensure_default_menus, require_menu_access
 from app.models import Base
 from app.routers import admin, auth, expenses, inventory, legal, notifications, petty_cash, projects, receivables, reports as reports_router, search, users, vault
 from app.routers import hris_employees, hris_attendance, hris_payroll, hris_recruitment, hris_self_service
@@ -26,6 +26,13 @@ def _ensure_incremental_schema():
     """Bridge existing local DBs that were created by create_all before newer fields."""
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
+
+    # New role enum values (HR, PROJECT_CONTROL) — run in autocommit, outside any
+    # transaction, for compatibility across PostgreSQL versions. Idempotent.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as ac:
+        for _role_val in ("PROJECT_CONTROL", "HR"):
+            ac.execute(text(f"ALTER TYPE rolename ADD VALUE IF NOT EXISTS '{_role_val}'"))
+
     with engine.begin() as conn:
         if "users" in table_names:
             cols = {c["name"] for c in inspector.get_columns("users")}
@@ -206,6 +213,7 @@ async def lifespan(app: FastAPI):
     from app.database import SessionLocal
     db = SessionLocal()
     try:
+        ensure_all_roles(db)
         ensure_default_menus(db)
     finally:
         db.close()

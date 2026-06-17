@@ -45,6 +45,7 @@ from app.dependencies import (
 )
 from app.models import (
     CostCentre, CostCode, Expense, ExpenseStatus, ExpenseType, Project, RoleName,
+    effective_roles,
 )
 from app.notify import push, push_to_role
 from app.schemas import (
@@ -486,24 +487,24 @@ def verify_expense(
         raise HTTPException(status_code=409,
                             detail="Expense must be in 'submitted' status to verify")
 
-    expected_role = expense.current_approver_role
-    caller_role   = current_user.role.name.value
+    expected_role  = expense.current_approver_role
+    caller_values  = {r.value for r in effective_roles(current_user.role.name)}
 
-    # Only the expected role (or SUPER_ADMIN) may act
-    if caller_role != expected_role and current_user.role.name != RoleName.SUPER_ADMIN:
+    # Only the expected role (or SUPER_ADMIN) may act. HR acts as GA via aliasing.
+    if expected_role not in caller_values and current_user.role.name != RoleName.SUPER_ADMIN:
         raise HTTPException(
             status_code=403,
             detail=f"This expense is waiting for {expected_role} to verify",
         )
-    # Additional guard: only GA/CC/SA may call verify at all
-    allowed_verify_roles = {RoleName.GA, RoleName.COST_CONTROL, RoleName.SUPER_ADMIN}
+    # Additional guard: only GA(/HR)/CC/SA may call verify at all
+    allowed_verify_roles = {RoleName.GA, RoleName.HR, RoleName.COST_CONTROL, RoleName.SUPER_ADMIN}
     if current_user.role.name not in allowed_verify_roles:
         raise HTTPException(403, "Only GA or Cost Control can perform verification")
 
     before = model_to_dict(expense)
 
-    # Record who did what
-    if current_user.role.name == RoleName.GA:
+    # Record who did what (GA/HR do the reimbursement receipt review)
+    if current_user.role.name in (RoleName.GA, RoleName.HR):
         expense.receipt_reviewed_by = current_user.id
         action_label = "RECEIPT_REVIEW"
         notif_msg    = f"Bukti reimburse #{expense.id} telah diverifikasi oleh GA"
@@ -557,7 +558,8 @@ def approve_expense(
                             detail="Expense must be submitted or verified to approve")
 
     expected_role = expense.current_approver_role
-    if current_user.role.name.value != expected_role and current_user.role.name != RoleName.SUPER_ADMIN:
+    caller_values = {r.value for r in effective_roles(current_user.role.name)}
+    if expected_role not in caller_values and current_user.role.name != RoleName.SUPER_ADMIN:
         raise HTTPException(
             status_code=403,
             detail=f"Current approval step requires role: {expected_role}",

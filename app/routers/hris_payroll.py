@@ -37,7 +37,7 @@ from app.hris_tax import calculate_pph21_netto, calculate_pph21_gross_up, DEFAUL
 from app.models import (
     AttendanceRecord, Employee, PayrollPeriod, PayrollRun, PaySlip,
     SalaryAssignment, SalaryComponent,
-    PayrollStatus, PPh21Method, SalaryComponentType, RoleName,
+    PayrollStatus, PPh21Method, SalaryComponentType, RoleName, effective_roles,
 )
 from app.pdf_generator import generate_payslip
 from app.schemas import (
@@ -56,7 +56,7 @@ _FINANCE_ROLES = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.FINANCE)
 
 
 def _require(cu: Employee, roles: tuple) -> None:
-    if cu.role.name not in roles:
+    if not any(r in roles for r in effective_roles(cu.role.name)):
         raise HTTPException(403, f"Requires one of: {[r.value for r in roles]}")
 
 

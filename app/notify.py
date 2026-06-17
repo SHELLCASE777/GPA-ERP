@@ -4,7 +4,7 @@ Call push() / push_to_role() before db.commit() — they only add objects to the
 """
 from sqlalchemy.orm import Session
 
-from app.models import Notification, RoleName, User
+from app.models import Notification, RoleName, User, roles_inheriting
 
 
 def push(db: Session, user_id: int, title: str, body: str, link: str | None = None) -> None:
@@ -32,12 +32,13 @@ def push_to_role(
     body: str,
     link: str | None = None,
 ) -> None:
-    """Queue a notification for every active user that holds *role*."""
+    """Queue a notification for every active user that holds *role* (or a role
+    that inherits it, e.g. HR receives GA notifications)."""
     from app.models import Role  # local import to avoid circular
     users = (
         db.query(User)
         .join(User.role)
-        .filter(Role.name == role, User.is_active == True)
+        .filter(Role.name.in_(roles_inheriting(role)), User.is_active == True)
         .all()
     )
     for u in users:

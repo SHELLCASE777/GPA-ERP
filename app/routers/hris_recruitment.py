@@ -29,7 +29,7 @@ from app.models import (
     Employee, EmployeeStatus, EmploymentType,
     Interview, InterviewResult,
     JobPosting, OnboardingTask,
-    PostingStatus, RoleName,
+    PostingStatus, RoleName, effective_roles,
 )
 from app.schemas import (
     ApplicantCreate, ApplicantResponse,
@@ -44,11 +44,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["HRIS Recruitment"])
 
 _HR_ROLES  = (RoleName.SUPER_ADMIN, RoleName.MD)
-_MGR_ROLES = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.GA)
+_MGR_ROLES = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.GA, RoleName.HR)
 
 
 def _require(cu: Any, roles: tuple) -> None:
-    if cu.role.name not in roles:
+    if not any(r in roles for r in effective_roles(cu.role.name)):
         raise HTTPException(403, f"Requires one of: {[r.value for r in roles]}")
 
 

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import ApprovalRule, CostCodeCategory, RoleName, User
+from app.models import ApprovalRule, CostCodeCategory, RoleName, User, effective_roles
 
 settings = get_settings()
 
@@ -116,7 +116,7 @@ def require_role(*roles: RoleName):
     Usage: Depends(require_role(RoleName.PM, RoleName.SUPER_ADMIN))
     """
     def _check(current_user: CurrentUser) -> User:
-        if current_user.role.name not in roles:
+        if not any(r in roles for r in effective_roles(current_user.role.name)):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Requires one of: {[r.value for r in roles]}",

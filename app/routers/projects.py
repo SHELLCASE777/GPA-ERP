@@ -28,7 +28,7 @@ from app.schemas import (
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
-_write_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.COST_CONTROL)
+_write_roles = (RoleName.SUPER_ADMIN, RoleName.MD, RoleName.PM, RoleName.PROJECT_CONTROL, RoleName.COST_CONTROL)
 
 
 def _get_or_404(project_id: int, db: Session) -> Project:

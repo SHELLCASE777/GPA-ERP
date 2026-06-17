@@ -34,14 +34,36 @@ class TimestampMixin:
 # ─── Enumerations ────────────────────────────────────────────────────────────
 
 class RoleName(str, enum.Enum):
-    SUPER_ADMIN  = "SUPER_ADMIN"
-    MD           = "MD"
-    PM           = "PM"
-    COST_CONTROL = "COST_CONTROL"
-    FINANCE      = "FINANCE"
-    GA           = "GA"
-    STAFF        = "STAFF"
-    WORKER       = "WORKER"   # Site/field worker — HRIS self-service only
+    SUPER_ADMIN     = "SUPER_ADMIN"
+    MD              = "MD"
+    PM              = "PM"
+    PROJECT_CONTROL = "PROJECT_CONTROL"  # mirrors PM access
+    COST_CONTROL    = "COST_CONTROL"
+    FINANCE         = "FINANCE"
+    GA              = "GA"
+    HR              = "HR"                # mirrors GA access
+    STAFF           = "STAFF"
+    WORKER          = "WORKER"   # Site/field worker — HRIS self-service only
+
+
+# ── Role aliases ──────────────────────────────────────────────────────────────
+# A role that inherits ALL access from another role. Authorization checks treat
+# the alias role as its target (e.g. HR is allowed wherever GA is allowed).
+ROLE_ALIASES: "dict[RoleName, RoleName]" = {
+    RoleName.HR: RoleName.GA,
+    RoleName.PROJECT_CONTROL: RoleName.PM,
+}
+
+
+def effective_roles(role: "RoleName") -> "tuple[RoleName, ...]":
+    """The role itself plus the role it inherits access from (if any)."""
+    alias = ROLE_ALIASES.get(role)
+    return (role, alias) if alias else (role,)
+
+
+def roles_inheriting(role: "RoleName") -> "tuple[RoleName, ...]":
+    """The role itself plus any role that aliases to it (notification fan-out)."""
+    return (role, *[r for r, target in ROLE_ALIASES.items() if target == role])
 
 
 class ProjectStatus(str, enum.Enum):

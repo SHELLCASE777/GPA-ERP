@@ -47,7 +47,7 @@ ROLE_PRESETS: dict[str, set[str]] = {
     "PM": {
         "dashboard", "action_center", "project_command", "spending",
         "inventory", "legal", "reports",
-        "hris_dashboard", "hris_attendance", "hris_leave", "hris_my_payslip",
+        "hris_dashboard", "hris_employees", "hris_attendance", "hris_leave", "hris_my_payslip",
     },
     "COST_CONTROL": {
         "dashboard", "action_center", "project_command", "spending", "petty_cash",
@@ -89,6 +89,31 @@ def ensure_all_roles(db: Session) -> None:
     for name in RoleName:
         if name not in existing:
             db.add(Role(name=name))
+            changed = True
+    if changed:
+        db.commit()
+
+
+def grant_menu_to_roles(db: Session, menu_key: str, role_names: tuple[RoleName, ...]) -> None:
+    """Ensure active users with the given roles can access menu_key. Add-only —
+    never overrides an explicit per-user deny. Backfills existing users when a
+    role preset gains a new menu."""
+    menu = db.query(AppMenu).filter(AppMenu.key == menu_key, AppMenu.is_active == True).first()
+    if not menu:
+        return
+    users = (
+        db.query(User).join(User.role)
+        .filter(Role.name.in_(role_names), User.is_active == True).all()
+    )
+    changed = False
+    for u in users:
+        exists = (
+            db.query(UserMenuPermission.id)
+            .filter(UserMenuPermission.user_id == u.id, UserMenuPermission.menu_id == menu.id)
+            .first()
+        )
+        if not exists:
+            db.add(UserMenuPermission(user_id=u.id, menu_id=menu.id, can_access=True))
             changed = True
     if changed:
         db.commit()

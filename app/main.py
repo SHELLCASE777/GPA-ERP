@@ -14,7 +14,7 @@ from sqlalchemy import inspect, text
 
 from app.config import get_settings
 from app.database import engine
-from app.menu_permissions import ensure_all_roles, ensure_default_menus, require_menu_access
+from app.menu_permissions import ensure_all_roles, ensure_default_menus, grant_menu_to_roles, require_menu_access
 from app.models import Base
 from app.routers import admin, auth, expenses, inventory, legal, notifications, petty_cash, projects, receivables, reports as reports_router, search, users, vault
 from app.routers import hris_employees, hris_attendance, hris_payroll, hris_recruitment, hris_self_service
@@ -215,6 +215,9 @@ async def lifespan(app: FastAPI):
     try:
         ensure_all_roles(db)
         ensure_default_menus(db)
+        # Backfill: PM / Project Control gain the Data Karyawan menu (for user<->employee linking)
+        from app.models import RoleName as _RN
+        grant_menu_to_roles(db, "hris_employees", (_RN.PM, _RN.PROJECT_CONTROL))
     finally:
         db.close()
     yield
